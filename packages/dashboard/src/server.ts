@@ -139,15 +139,20 @@ function pageRoute(pool: pg.Pool, def: PageDef): Route {
           }),
         );
       } catch (err) {
-        logger.error('ページ描画に失敗しました', err, { path: def.path });
-        sendHtml(
-          res,
-          500,
-          errorPage(500, 'エラーが発生しました', 'データの取得に失敗しました。時間をおいて再度お試しください。'),
-        );
+        respondRenderFailure(res, def.path, err);
       }
     },
   };
+}
+
+/** ページ描画失敗時の共通 500 応答。 */
+function respondRenderFailure(res: http.ServerResponse, path: string, err: unknown): void {
+  logger.error('ページ描画に失敗しました', err, { path });
+  sendHtml(
+    res,
+    500,
+    errorPage(500, 'エラーが発生しました', 'データの取得に失敗しました。時間をおいて再度お試しください。'),
+  );
 }
 
 function respondError(res: http.ServerResponse, err: unknown): void {
@@ -207,12 +212,7 @@ function adminGetRoute(pool: pg.Pool, adminPool: pg.Pool | undefined, def: Admin
         const body = await def.render(adminPool, { csrfToken, url: ctx.url });
         sendHtml(res, 200, renderAdminShell(def, viewer, body));
       } catch (err) {
-        logger.error('ページ描画に失敗しました', err, { path: def.path });
-        sendHtml(
-          res,
-          500,
-          errorPage(500, 'エラーが発生しました', 'データの取得に失敗しました。時間をおいて再度お試しください。'),
-        );
+        respondRenderFailure(res, def.path, err);
       }
     },
   };
@@ -241,6 +241,18 @@ function adminPostRoute(pool: pg.Pool, adminPool: pg.Pool | undefined, def: Admi
         form = await readFormBody(req);
         verifyCsrfToken(req.headers.cookie, form);
       } catch (err) {
+        // 認証系(401/403)以外の想定エラー(例: 413 ボディ過大)は、
+        // 「認証処理に失敗しました」と誤報告せず本来のステータスとメッセージで応答する
+        if (isAppError(err) && err.status !== 401 && err.status !== 403) {
+          logger.warn('マスタ管理の書込リクエストを受理できません', {
+            code: err.code,
+            message: err.message,
+            path: def.path,
+            operator: viewer.email,
+          });
+          sendHtml(res, err.status, errorPage(err.status, 'エラーが発生しました', err.message));
+          return;
+        }
         respondError(res, err);
         return;
       }
@@ -268,12 +280,7 @@ function adminPostRoute(pool: pg.Pool, adminPool: pg.Pool | undefined, def: Admi
             });
             sendHtml(res, err.status, renderAdminShell(def, viewer, body));
           } catch (renderErr) {
-            logger.error('ページ描画に失敗しました', renderErr, { path: def.path });
-            sendHtml(
-              res,
-              500,
-              errorPage(500, 'エラーが発生しました', 'データの取得に失敗しました。時間をおいて再度お試しください。'),
-            );
+            respondRenderFailure(res, def.path, renderErr);
           }
           return;
         }

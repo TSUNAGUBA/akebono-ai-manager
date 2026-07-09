@@ -1,4 +1,5 @@
 import { h, html, raw, type Raw } from '../../render/html.js';
+import { badge } from '../../render/components.js';
 import { CSRF_FIELD } from '../../admin/csrf.js';
 
 /** マスタ管理ページの描画コンテキスト。 */
@@ -39,8 +40,11 @@ export function flashMessages(ctx: AdminPageContext): Raw {
     parts.push(`<div class="alert error">${h(ctx.errorMessage)}</div>`);
   }
   const saved = ctx.url.searchParams.get('saved');
-  if (saved !== null && SAVED_MESSAGES[saved] !== undefined) {
-    parts.push(`<div class="alert ok">${h(SAVED_MESSAGES[saved])}</div>`);
+  // own-property チェック: 継承プロパティ(?saved=toString 等)を成功メッセージとして扱わない
+  const message =
+    saved !== null && Object.hasOwn(SAVED_MESSAGES, saved) ? SAVED_MESSAGES[saved] : undefined;
+  if (message !== undefined) {
+    parts.push(`<div class="alert ok">${h(message)}</div>`);
   }
   return raw(parts.join(''));
 }
@@ -52,9 +56,7 @@ export function csrfField(ctx: AdminPageContext): Raw {
 
 /** 有効/無効のバッジ表現(業界・関係種別マスタ共通)。 */
 export function activeBadge(active: boolean): Raw {
-  return active
-    ? html`<span class="badge ok">有効</span>`
-    : html`<span class="badge muted">無効</span>`;
+  return active ? badge('有効', 'ok') : badge('無効', 'muted');
 }
 
 /**

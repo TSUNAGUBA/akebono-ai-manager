@@ -5,12 +5,14 @@ import { h, html, raw, type Raw } from '../../render/html.js';
 import type { Viewer } from '../../render/layout.js';
 import {
   auditLog,
-  ID_PATTERN,
+  hasPgCode,
+  ID_MAX_LENGTH,
   invalidInput,
-  isForeignKeyViolation,
-  isUniqueViolation,
   optionalText,
+  PG_FOREIGN_KEY_VIOLATION,
+  PG_UNIQUE_VIOLATION,
   requireId,
+  requireRef,
   requireText,
   writeConflict,
 } from '../../admin/form.js';
@@ -178,14 +180,31 @@ function parseIndustrySelection(form: URLSearchParams): { industryIds: string[];
   if (industryIds.length === 0) {
     throw invalidInput('所属業界を 1 つ以上選択してください');
   }
+  // 既存の業界マスタを参照するため厳格パターンは適用しない(実在性は FK 制約が担保)
   for (const id of industryIds) {
-    if (!ID_PATTERN.test(id)) throw invalidInput('所属業界の指定が不正です');
+    if (id.length > ID_MAX_LENGTH) throw invalidInput('所属業界の指定が不正です');
   }
   const primary = (form.get('primary_industry') ?? '').trim();
   if (primary === '' || !industryIds.includes(primary)) {
     throw invalidInput('主業界は所属業界の中から 1 つ選択してください');
   }
   return { industryIds, primary };
+}
+
+/** 所属業界(customer_industries)を単一 INSERT で書き込む(create / update 共通)。 */
+async function insertCustomerIndustries(
+  client: pg.PoolClient,
+  customerId: string,
+  industryIds: readonly string[],
+  primary: string,
+): Promise<void> {
+  await query(
+    client,
+    `INSERT INTO ops.customer_industries (customer_id, industry_id, is_primary)
+     SELECT $1, industry_id, is_primary
+     FROM unnest($2::text[], $3::boolean[]) AS t(industry_id, is_primary)`,
+    [customerId, industryIds, industryIds.map((id) => id === primary)],
+  );
 }
 
 /** 顧客と所属業界(customer_industries)への書込。成功時はリダイレクト先を返す。 */
@@ -211,20 +230,13 @@ export async function handleAdminCustomersPost(
            VALUES ($1, $2, $3, $4, $5)`,
           [customerId, name, primary, notes, folderId],
         );
-        for (const industryId of industryIds) {
-          await query(
-            client,
-            `INSERT INTO ops.customer_industries (customer_id, industry_id, is_primary)
-             VALUES ($1, $2, $3)`,
-            [customerId, industryId, industryId === primary],
-          );
-        }
+        await insertCustomerIndustries(client, customerId, industryIds, primary);
       });
     } catch (err) {
-      if (isUniqueViolation(err)) {
+      if (hasPgCode(err, PG_UNIQUE_VIOLATION)) {
         throw writeConflict(`顧客ID「${customerId}」は既に存在します`);
       }
-      if (isForeignKeyViolation(err)) {
+      if (hasPgCode(err, PG_FOREIGN_KEY_VIOLATION)) {
         throw invalidInput('存在しない業界が指定されました。ページを再読み込みしてやり直してください');
       }
       throw err;
@@ -234,7 +246,8 @@ export async function handleAdminCustomersPost(
   }
 
   if (action === 'update') {
-    const customerId = requireId(form, 'customer_id', '顧客ID');
+    // 既存レコード参照のため厳格パターンは適用しない(実在性は WHERE 句が担保)
+    const customerId = requireRef(form, 'customer_id', '顧客ID');
     const name = requireText(form, 'name', '名称');
     const notes = optionalText(form, 'notes', 'メモ');
     const folderId = optionalText(form, 'knowledge_drive_folder_id', 'ナレッジ Drive フォルダID');
@@ -253,17 +266,10 @@ export async function handleAdminCustomersPost(
         }
         // 所属業界は洗い替え(DELETE + INSERT)。同一トランザクション内のため中間状態は見えない
         await query(client, `DELETE FROM ops.customer_industries WHERE customer_id = $1`, [customerId]);
-        for (const industryId of industryIds) {
-          await query(
-            client,
-            `INSERT INTO ops.customer_industries (customer_id, industry_id, is_primary)
-             VALUES ($1, $2, $3)`,
-            [customerId, industryId, industryId === primary],
-          );
-        }
+        await insertCustomerIndustries(client, customerId, industryIds, primary);
       });
     } catch (err) {
-      if (isForeignKeyViolation(err)) {
+      if (hasPgCode(err, PG_FOREIGN_KEY_VIOLATION)) {
         throw invalidInput('存在しない業界が指定されました。ページを再読み込みしてやり直してください');
       }
       throw err;

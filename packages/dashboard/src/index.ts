@@ -7,11 +7,10 @@ const pool = createPool();
 // DB_ADMIN_USER / DB_ADMIN_PASSWORD が未設定なら undefined となり、
 // マスタ管理ページは案内表示に切り替わる(既存の閲覧機能には影響しない)。
 const adminDbConfig = loadAdminDbConfig();
-let adminPool;
+const adminPool = adminDbConfig === undefined ? undefined : createPool(adminDbConfig);
 if (adminDbConfig === undefined) {
   logger.info('マスタ管理は未構成です(DB_ADMIN_USER / DB_ADMIN_PASSWORD 未設定)。閲覧機能のみで起動します');
 } else {
-  adminPool = createPool(adminDbConfig);
   logger.info('マスタ管理用の管理 DB プールを初期化しました', { user: adminDbConfig.user });
 }
 

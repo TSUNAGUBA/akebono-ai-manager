@@ -5,11 +5,13 @@ import { h, html, raw, type Raw } from '../../render/html.js';
 import type { Viewer } from '../../render/layout.js';
 import {
   auditLog,
+  hasPgCode,
   invalidInput,
   isChecked,
-  isUniqueViolation,
   optionalInt,
+  PG_UNIQUE_VIOLATION,
   requireId,
+  requireRef,
   requireText,
   writeConflict,
 } from '../../admin/form.js';
@@ -148,7 +150,7 @@ export async function handleAdminIndustriesPost(
         [industryId, name, displayOrder, active],
       );
     } catch (err) {
-      if (isUniqueViolation(err)) {
+      if (hasPgCode(err, PG_UNIQUE_VIOLATION)) {
         throw writeConflict(`業界ID「${industryId}」は既に存在します`);
       }
       throw err;
@@ -158,7 +160,8 @@ export async function handleAdminIndustriesPost(
   }
 
   if (action === 'update') {
-    const industryId = requireId(form, 'industry_id', '業界ID');
+    // 既存レコード参照のため厳格パターンは適用しない(実在性は WHERE 句が担保)
+    const industryId = requireRef(form, 'industry_id', '業界ID');
     const name = requireText(form, 'name', '表示名');
     const displayOrder = optionalInt(form, 'display_order', '表示順');
     const active = isChecked(form, 'active');

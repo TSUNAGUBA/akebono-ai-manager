@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type http from 'node:http';
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import type pg from 'pg';
 import { ERROR_CODES, isAppError } from '@ai-manager/shared';
 import {
@@ -10,12 +11,13 @@ import {
   verifyCsrfToken,
 } from '../src/admin/csrf.js';
 import {
+  hasPgCode,
   ID_PATTERN,
   isChecked,
-  isUniqueViolation,
   optionalInt,
   optionalText,
   requireId,
+  requireRef,
   requireText,
 } from '../src/admin/form.js';
 import { renderAdminIndustries } from '../src/pages/admin/industries.js';
@@ -23,6 +25,7 @@ import { handleAdminCustomersPost } from '../src/pages/admin/customers.js';
 import { handleAdminIndustriesPost } from '../src/pages/admin/industries.js';
 import { handleAdminRelationsPost } from '../src/pages/admin/relations.js';
 import { pageLayout, type Viewer } from '../src/render/layout.js';
+import { createDashboardServer } from '../src/server.js';
 
 const VALID_TOKEN = 'a'.repeat(64);
 const viewer: Viewer = { userId: 'u1', displayName: 'テスト', email: 't@example.com', role: 'admin' };
@@ -45,6 +48,7 @@ async function expectAppErrorAsync(
   fn: () => Promise<unknown>,
   code: string,
   status: number,
+  messageContains?: string,
 ): Promise<void> {
   try {
     await fn();
@@ -53,6 +57,9 @@ async function expectAppErrorAsync(
     if (isAppError(err)) {
       expect(err.code).toBe(code);
       expect(err.status).toBe(status);
+      if (messageContains !== undefined) {
+        expect(err.message).toContain(messageContains);
+      }
     }
     return;
   }
@@ -109,27 +116,31 @@ describe('CSRF(二重送信クッキー方式)', () => {
   function mockReqRes(cookie?: string): {
     req: http.IncomingMessage;
     res: http.ServerResponse;
-    headers: Record<string, string>;
+    headers: Record<string, string[]>;
   } {
-    const headers: Record<string, string> = {};
+    const headers: Record<string, string[]> = {};
     const req = { headers: cookie === undefined ? {} : { cookie } } as http.IncomingMessage;
     const res = {
-      setHeader: (name: string, value: string) => {
-        headers[name.toLowerCase()] = value;
+      // 実装は appendHeader を使う(既存の Set-Cookie を上書きしない)
+      appendHeader: (name: string, value: string) => {
+        const key = name.toLowerCase();
+        headers[key] = [...(headers[key] ?? []), value];
       },
     } as unknown as http.ServerResponse;
     return { req, res, headers };
   }
 
-  it('ensureCsrfToken: クッキーがなければ新規発行して Set-Cookie する', () => {
+  it('ensureCsrfToken: クッキーがなければ新規発行して Set-Cookie する(__Host- 要件: Secure / Path=/)', () => {
     const { req, res, headers } = mockReqRes();
     const token = ensureCsrfToken(req, res);
     expect(token).toMatch(/^[0-9a-f]{64}$/);
-    const setCookie = headers['set-cookie'];
+    expect(CSRF_COOKIE.startsWith('__Host-')).toBe(true);
+    const setCookie = (headers['set-cookie'] ?? []).join('\n');
     expect(setCookie).toContain(`${CSRF_COOKIE}=${token}`);
     expect(setCookie).toContain('SameSite=Strict');
     expect(setCookie).toContain('Secure');
-    expect(setCookie).toContain('Path=/admin');
+    expect(setCookie).toContain('Path=/;');
+    expect(setCookie).not.toContain('Domain=');
     expect(setCookie).not.toContain('HttpOnly');
   });
 
@@ -143,7 +154,16 @@ describe('CSRF(二重送信クッキー方式)', () => {
     const { req, res, headers } = mockReqRes(`${CSRF_COOKIE}=broken`);
     const token = ensureCsrfToken(req, res);
     expect(token).not.toBe('broken');
-    expect(headers['set-cookie']).toContain(`${CSRF_COOKIE}=${token}`);
+    expect((headers['set-cookie'] ?? []).join('\n')).toContain(`${CSRF_COOKIE}=${token}`);
+  });
+
+  it('ensureCsrfToken: 既存の Set-Cookie ヘッダーへ追記する(上書きしない)', () => {
+    const { req, res, headers } = mockReqRes();
+    res.appendHeader('set-cookie', 'other=1');
+    const token = ensureCsrfToken(req, res);
+    expect(headers['set-cookie']).toHaveLength(2);
+    expect(headers['set-cookie']?.[0]).toBe('other=1');
+    expect(headers['set-cookie']?.[1]).toContain(`${CSRF_COOKIE}=${token}`);
   });
 });
 
@@ -164,6 +184,22 @@ describe('マスタ管理フォームの入力検証', () => {
   it('requireId: 64 文字超は AIM-6004(400)', () => {
     expectAppError(
       () => requireId(form({ id: 'a'.repeat(65) }), 'id', 'ID'),
+      ERROR_CODES.ADMIN_INPUT_INVALID,
+      400,
+    );
+  });
+
+  it('requireRef: 既存参照IDはパターン検証しない(非空+長さ上限のみ)', () => {
+    // パターン外の既存 ID(大文字・空白・日本語等)も操作対象として受け入れる
+    expect(requireRef(form({ id: 'Legacy Customer' }), 'id', 'ID')).toBe('Legacy Customer');
+    expect(requireRef(form({ id: '  小売 ' }), 'id', 'ID')).toBe('小売');
+  });
+
+  it('requireRef: 空・64 文字超は AIM-6004(400)', () => {
+    expectAppError(() => requireRef(form({ id: '' }), 'id', 'ID'), ERROR_CODES.ADMIN_INPUT_INVALID, 400);
+    expectAppError(() => requireRef(form({}), 'id', 'ID'), ERROR_CODES.ADMIN_INPUT_INVALID, 400);
+    expectAppError(
+      () => requireRef(form({ id: 'a'.repeat(65) }), 'id', 'ID'),
       ERROR_CODES.ADMIN_INPUT_INVALID,
       400,
     );
@@ -199,12 +235,12 @@ describe('マスタ管理フォームの入力検証', () => {
   });
 });
 
-/** 何を投げるかを差し替えられるスタブプール。 */
-function stubPool(behavior?: { rejectWith?: unknown }): pg.Pool {
+/** 何を投げるか・何件更新されたことにするかを差し替えられるスタブプール。 */
+function stubPool(behavior?: { rejectWith?: unknown; rowCount?: number }): pg.Pool {
   const query = () =>
     behavior?.rejectWith !== undefined
       ? Promise.reject(behavior.rejectWith)
-      : Promise.resolve({ rows: [], rowCount: 1 });
+      : Promise.resolve({ rows: [], rowCount: behavior?.rowCount ?? 1 });
   return {
     query,
     connect: () => Promise.resolve({ query, release: () => undefined }),
@@ -240,7 +276,7 @@ describe('マスタ管理の書込ハンドラ', () => {
   });
 
   it('industries: 一意制約違反(23505)は AIM-6005(409)に変換する', async () => {
-    expect(isUniqueViolation(pgError('23505'))).toBe(false); // 生の pg エラーは対象外(query() が包んだ AppError の cause を見る)
+    expect(hasPgCode(pgError('23505'), '23505')).toBe(false); // 生の pg エラーは対象外(query() が包んだ AppError の cause を見る)
     await expectAppErrorAsync(
       () =>
         handleAdminIndustriesPost(
@@ -324,6 +360,77 @@ describe('マスタ管理の書込ハンドラ', () => {
       409,
     );
   });
+
+  it('industries: update 対象が存在しない(rowCount=0)場合は AIM-6004(400・見つかりません)', async () => {
+    await expectAppErrorAsync(
+      () =>
+        handleAdminIndustriesPost(
+          stubPool({ rowCount: 0 }),
+          viewer,
+          new URLSearchParams({ action: 'update', industry_id: 'ghost', name: '小売業' }),
+        ),
+      ERROR_CODES.ADMIN_INPUT_INVALID,
+      400,
+      '見つかりません',
+    );
+  });
+
+  it('customers: update 対象が存在しない(rowCount=0)場合は AIM-6004(400・見つかりません)', async () => {
+    const form = new URLSearchParams({
+      action: 'update',
+      customer_id: 'ghost',
+      name: '顧客',
+      primary_industry: 'retail',
+    });
+    form.append('industries', 'retail');
+    await expectAppErrorAsync(
+      () => handleAdminCustomersPost(stubPool({ rowCount: 0 }), viewer, form),
+      ERROR_CODES.ADMIN_INPUT_INVALID,
+      400,
+      '見つかりません',
+    );
+  });
+
+  it('relations: update_type 対象が存在しない(rowCount=0)場合は AIM-6004(400・見つかりません)', async () => {
+    await expectAppErrorAsync(
+      () =>
+        handleAdminRelationsPost(
+          stubPool({ rowCount: 0 }),
+          viewer,
+          new URLSearchParams({ action: 'update_type', relation_type: 'ghost', label: '種別' }),
+        ),
+      ERROR_CODES.ADMIN_INPUT_INVALID,
+      400,
+      '見つかりません',
+    );
+  });
+
+  it('relations: 既存レコード参照の ID は厳格パターン外でも操作できる(delete_relation)', async () => {
+    const location = await handleAdminRelationsPost(
+      stubPool(),
+      viewer,
+      new URLSearchParams({
+        action: 'delete_relation',
+        from_customer_id: 'Legacy Customer',
+        to_customer_id: 'shimamura',
+        relation_type: 'supplies_to',
+      }),
+    );
+    expect(location).toContain('saved=deleted');
+  });
+
+  it('relations: 新規作成(create_type)の種別IDは厳格パターン検証を維持する', async () => {
+    await expectAppErrorAsync(
+      () =>
+        handleAdminRelationsPost(
+          stubPool(),
+          viewer,
+          new URLSearchParams({ action: 'create_type', relation_type: 'Bad Type', label: '種別' }),
+        ),
+      ERROR_CODES.ADMIN_INPUT_INVALID,
+      400,
+    );
+  });
 });
 
 describe('マスタ管理ページの描画', () => {
@@ -356,6 +463,67 @@ describe('マスタ管理ページの描画', () => {
     // エラーメッセージはエスケープして表示する
     expect(errored).toContain('&lt;b&gt;入力エラー&lt;/b&gt;');
     expect(errored).not.toContain('<b>入力エラー</b>');
+  });
+
+  it('?saved= に継承プロパティ名(toString 等)を渡しても成功バナーを出さない', async () => {
+    const out = (
+      await renderAdminIndustries(stubPool(), {
+        csrfToken: VALID_TOKEN,
+        url: new URL('http://localhost/admin/industries?saved=toString'),
+      })
+    ).html;
+    expect(out).not.toContain('alert ok');
+  });
+});
+
+describe('adminPostRoute のエラー応答(HTTP 統合)', () => {
+  it('413: ボディ過大は AppError のステータスとメッセージで応答する(認証エラーと誤報告しない)', async () => {
+    const prevAuthMode = process.env['AUTH_MODE'];
+    process.env['AUTH_MODE'] = 'header';
+    // 認証(ops.users 照会)には常に admin を返すスタブを使う
+    const usersPool = {
+      query: () =>
+        Promise.resolve({
+          rows: [{ user_id: 'u1', display_name: 'テスト', email: 't@example.com', role: 'admin' }],
+          rowCount: 1,
+        }),
+    } as unknown as pg.Pool;
+    const server = createDashboardServer(usersPool, stubPool());
+    await new Promise<void>((resolve) => server.listen(0, resolve));
+    const { port } = server.address() as AddressInfo;
+    try {
+      const res = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+        const req = http.request(
+          {
+            host: '127.0.0.1',
+            port,
+            path: '/admin/industries',
+            method: 'POST',
+            headers: {
+              'content-type': 'application/x-www-form-urlencoded',
+              'x-goog-authenticated-user-email': 'accounts.google.com:t@example.com',
+            },
+          },
+          (response) => {
+            let data = '';
+            response.setEncoding('utf8');
+            response.on('data', (chunk: string) => {
+              data += chunk;
+            });
+            response.on('end', () => resolve({ status: response.statusCode ?? 0, body: data }));
+          },
+        );
+        req.on('error', reject);
+        req.end('x'.repeat(1024 * 1024 + 1)); // 上限 1MiB 超のボディ
+      });
+      expect(res.status).toBe(413);
+      expect(res.body).toContain('リクエストボディが大きすぎます');
+      expect(res.body).not.toContain('認証処理に失敗しました');
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      if (prevAuthMode === undefined) delete process.env['AUTH_MODE'];
+      else process.env['AUTH_MODE'] = prevAuthMode;
+    }
   });
 });
 

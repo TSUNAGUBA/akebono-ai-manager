@@ -3,13 +3,20 @@ import type { Viewer } from '../render/layout.js';
 
 /**
  * マスタ管理フォームの入力検証と監査ログ(要件 v0.3 §5.1)。
- * 識別子(industry_id / customer_id / relation_type)は URL・Drive フォルダ規約に
- * 使われるため ^[a-z0-9_-]+$ に制限する。
+ * 識別子(industry_id / customer_id / relation_type)の検証は二段構え:
+ *   - 新規作成時の ID: URL・Drive フォルダ規約に使われるため ^[a-z0-9_-]+$ に制限する(requireId)
+ *   - 既存レコードを参照する ID: 実在性は FK 制約・WHERE 句が担保するため、
+ *     非空+長さ上限のみ検証する(requireRef)。パターン外の既存 ID も操作可能に保つ
  */
 
 export const ID_PATTERN = /^[a-z0-9_-]+$/;
-const ID_MAX_LENGTH = 64;
+export const ID_MAX_LENGTH = 64;
 const TEXT_MAX_LENGTH = 500;
+
+/** PostgreSQL SQLSTATE: 一意制約違反 */
+export const PG_UNIQUE_VIOLATION = '23505';
+/** PostgreSQL SQLSTATE: 外部キー違反 */
+export const PG_FOREIGN_KEY_VIOLATION = '23503';
 
 /** 入力値エラー(AIM-6004 / 400)。ページ内のエラーバナーとして表示される。 */
 export function invalidInput(message: string): AppError {
@@ -21,27 +28,32 @@ export function writeConflict(message: string): AppError {
   return new AppError(ERROR_CODES.ADMIN_WRITE_CONFLICT, message, { status: 409 });
 }
 
-/** query() が包んだ AppError の cause から PostgreSQL の一意制約違反(23505)を判定する。 */
-export function isUniqueViolation(err: unknown): boolean {
+/**
+ * query() が包んだ AppError の cause から PostgreSQL の SQLSTATE を判定する
+ * (一意制約違反 = PG_UNIQUE_VIOLATION、外部キー違反 = PG_FOREIGN_KEY_VIOLATION 等)。
+ */
+export function hasPgCode(err: unknown, code: string): boolean {
   if (!isAppError(err)) return false;
   const cause = err.cause as { code?: unknown } | undefined;
-  return typeof cause === 'object' && cause !== null && cause.code === '23505';
+  return typeof cause === 'object' && cause !== null && cause.code === code;
 }
 
-/** 同 cause から外部キー違反(23503)を判定する(存在しないマスタ参照等)。 */
-export function isForeignKeyViolation(err: unknown): boolean {
-  if (!isAppError(err)) return false;
-  const cause = err.cause as { code?: unknown } | undefined;
-  return typeof cause === 'object' && cause !== null && cause.code === '23503';
-}
-
-/** 必須の識別子(^[a-z0-9_-]+$)。URL・フォルダ規約に使われるため厳格に検証する。 */
-export function requireId(form: URLSearchParams, field: string, label: string): string {
+/**
+ * 既存レコードを参照する識別子(セレクトボックス・hidden input 由来)。
+ * 実在性は FK 制約・WHERE 句が担保するため、非空+長さ上限のみ検証する。
+ */
+export function requireRef(form: URLSearchParams, field: string, label: string): string {
   const value = (form.get(field) ?? '').trim();
   if (value === '') throw invalidInput(`${label}を入力してください`);
   if (value.length > ID_MAX_LENGTH) {
     throw invalidInput(`${label}は ${ID_MAX_LENGTH} 文字以内で入力してください`);
   }
+  return value;
+}
+
+/** 新規作成時の識別子(^[a-z0-9_-]+$)。URL・フォルダ規約に使われるため厳格に検証する。 */
+export function requireId(form: URLSearchParams, field: string, label: string): string {
+  const value = requireRef(form, field, label);
   if (!ID_PATTERN.test(value)) {
     throw invalidInput(
       `${label}は半角の小文字英数字・ハイフン・アンダースコアのみ使用できます(例: apparel-retail_01)`,

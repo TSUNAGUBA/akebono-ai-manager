@@ -6,15 +6,19 @@ import { AppError, ERROR_CODES } from '@ai-manager/shared';
  * CSRF 対策(要件 v0.3 §5.1: POST フォームには CSRF トークンを必須とする)。
  *
  * セッションレス構成のため二重送信クッキー方式を採用する:
- *   1. GET 時にランダムトークンを Set-Cookie(SameSite=Strict / Secure / Path=/admin)し、
+ *   1. GET 時にランダムトークンを Set-Cookie(SameSite=Strict / Secure / Path=/)し、
  *      同じ値を各フォームの hidden input に埋め込む
  *   2. POST 時にクッキーと hidden input の一致を検証する
  * SameSite=Strict によりクッキーはクロスサイトのリクエストに載らず、
  * 外部サイトからのフォーム送信はトークン不一致(欠落)で拒否される。
  * hidden input と突き合わせる方式のため HttpOnly は付けない。
+ *
+ * クッキー名は __Host- プレフィックス付き(cookie-tossing 耐性)。
+ * __Host- の要件により属性は Secure / Path=/ 固定・Domain 指定なしとする。
+ * Secure 属性のため plain HTTP では動作しないが、全デプロイ経路が HTTPS のため許容する。
  */
 
-export const CSRF_COOKIE = 'aim_csrf';
+export const CSRF_COOKIE = '__Host-aim_csrf';
 export const CSRF_FIELD = '_csrf';
 
 /** randomBytes(32) の hex 表現(64 文字)のみを有効なトークンとして扱う */
@@ -42,7 +46,8 @@ export function ensureCsrfToken(req: http.IncomingMessage, res: http.ServerRespo
   const existing = parseCookies(req.headers.cookie)[CSRF_COOKIE];
   if (existing !== undefined && TOKEN_PATTERN.test(existing)) return existing;
   const token = randomBytes(32).toString('hex');
-  res.setHeader('set-cookie', `${CSRF_COOKIE}=${token}; Path=/admin; SameSite=Strict; Secure`);
+  // appendHeader: 他処理が設定済みの Set-Cookie を上書きせず追記する
+  res.appendHeader('set-cookie', `${CSRF_COOKIE}=${token}; Path=/; SameSite=Strict; Secure`);
   return token;
 }
 

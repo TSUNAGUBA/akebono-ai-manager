@@ -3,15 +3,16 @@ import type pg from 'pg';
 import { responsiveTable, section } from '../../render/components.js';
 import { h, html, raw, type Raw } from '../../render/html.js';
 import type { Viewer } from '../../render/layout.js';
-import { CSRF_FIELD } from '../../admin/csrf.js';
 import {
   auditLog,
+  hasPgCode,
   invalidInput,
   isChecked,
-  isForeignKeyViolation,
-  isUniqueViolation,
   optionalText,
+  PG_FOREIGN_KEY_VIOLATION,
+  PG_UNIQUE_VIOLATION,
   requireId,
+  requireRef,
   requireText,
   writeConflict,
 } from '../../admin/form.js';
@@ -77,7 +78,7 @@ export async function renderAdminRelations(pool: pg.Pool, ctx: AdminPageContext)
   const deleteForm = (r: RelationRow): Raw =>
     raw(`<form method="post" action="${PATH}" class="inline-form"
       onsubmit="return confirm('この関係を削除しますか?')">
-      <input type="hidden" name="${CSRF_FIELD}" value="${h(ctx.csrfToken)}">
+      ${csrfField(ctx).html}
       <input type="hidden" name="action" value="delete_relation">
       <input type="hidden" name="from_customer_id" value="${h(r.from_customer_id)}">
       <input type="hidden" name="to_customer_id" value="${h(r.to_customer_id)}">
@@ -229,9 +230,10 @@ export async function handleAdminRelationsPost(
   const action = form.get('action');
 
   if (action === 'create_relation') {
-    const fromId = requireId(form, 'from_customer_id', 'From(起点の顧客)');
-    const toId = requireId(form, 'to_customer_id', 'To(相手の顧客)');
-    const relationType = requireId(form, 'relation_type', '関係種別');
+    // セレクトボックス由来の既存レコード参照のため厳格パターンは適用しない(実在性は FK 制約が担保)
+    const fromId = requireRef(form, 'from_customer_id', 'From(起点の顧客)');
+    const toId = requireRef(form, 'to_customer_id', 'To(相手の顧客)');
+    const relationType = requireRef(form, 'relation_type', '関係種別');
     const notes = optionalText(form, 'notes', 'メモ');
     if (fromId === toId) {
       throw invalidInput('From と To に同じ顧客は指定できません');
@@ -244,10 +246,10 @@ export async function handleAdminRelationsPost(
         [fromId, toId, relationType, notes],
       );
     } catch (err) {
-      if (isUniqueViolation(err)) {
+      if (hasPgCode(err, PG_UNIQUE_VIOLATION)) {
         throw writeConflict('同じ組み合わせの関係は既に登録されています');
       }
-      if (isForeignKeyViolation(err)) {
+      if (hasPgCode(err, PG_FOREIGN_KEY_VIOLATION)) {
         throw invalidInput('存在しない顧客または関係種別が指定されました。ページを再読み込みしてやり直してください');
       }
       throw err;
@@ -262,9 +264,10 @@ export async function handleAdminRelationsPost(
   }
 
   if (action === 'delete_relation') {
-    const fromId = requireId(form, 'from_customer_id', 'From(起点の顧客)');
-    const toId = requireId(form, 'to_customer_id', 'To(相手の顧客)');
-    const relationType = requireId(form, 'relation_type', '関係種別');
+    // 削除対象は既存レコード参照のため厳格パターンは適用しない(実在性は WHERE 句が担保)
+    const fromId = requireRef(form, 'from_customer_id', 'From(起点の顧客)');
+    const toId = requireRef(form, 'to_customer_id', 'To(相手の顧客)');
+    const relationType = requireRef(form, 'relation_type', '関係種別');
     // 既に削除済みでも成功扱い(冪等)。監査ログには結果件数を残す
     const result = await query(
       pool,
@@ -292,7 +295,7 @@ export async function handleAdminRelationsPost(
         [relationType, label, active],
       );
     } catch (err) {
-      if (isUniqueViolation(err)) {
+      if (hasPgCode(err, PG_UNIQUE_VIOLATION)) {
         throw writeConflict(`種別ID「${relationType}」は既に存在します`);
       }
       throw err;
@@ -302,7 +305,8 @@ export async function handleAdminRelationsPost(
   }
 
   if (action === 'update_type') {
-    const relationType = requireId(form, 'relation_type', '種別ID');
+    // 更新対象は既存レコード参照のため厳格パターンは適用しない(実在性は WHERE 句が担保)
+    const relationType = requireRef(form, 'relation_type', '種別ID');
     const label = requireText(form, 'label', '表示名');
     const active = isChecked(form, 'active');
     const result = await query(

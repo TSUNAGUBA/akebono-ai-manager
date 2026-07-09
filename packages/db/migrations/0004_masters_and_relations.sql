@@ -68,6 +68,9 @@ INSERT INTO ops.relation_types (relation_type, label) VALUES
 --   bedding        → bedding(主)
 --   logistics      → logistics(主)
 --   other          → other(主)
+-- 移行後、レガシー列 ops.customers.industry は新しい industry_id(主業界)を保持する。
+-- 管理 UI は主業界を industry 列へ書き込むため、旧 enum 値のままでは値空間が混在する。
+-- dwh ETL は当面この列を参照するため、本マイグレーション下部の UPDATE で値空間を統一する。
 INSERT INTO ops.customer_industries (customer_id, industry_id, is_primary)
 SELECT c.customer_id, m.industry_id, m.is_primary
 FROM ops.customers c
@@ -98,5 +101,15 @@ BEGIN
   END IF;
 END $$;
 
+-- ── レガシー列の値空間統一 ──────────────────────────────────
+-- 既存顧客の industry 列を旧 enum 値から新しい industry_id(主業界)へ更新する。
+-- 管理 UI(マスタ管理)は主業界を industry 列へ書き込むため、これで新旧の値空間が統一される。
+-- 注意: 新 industry_id('retail' 等)は旧 CHECK 制約の enum に含まれないため、
+--       この UPDATE は上記の CHECK 制約撤廃の後に実行する必要がある。
+UPDATE ops.customers c
+SET industry = ci.industry_id
+FROM ops.customer_industries ci
+WHERE ci.customer_id = c.customer_id AND ci.is_primary;
+
 COMMENT ON COLUMN ops.customers.industry IS
-  '旧・単一業界(廃止予定)。SoT は ops.customer_industries。dwh ETL の切替完了後のバージョンで削除する';
+  '旧・単一業界(廃止予定)。SoT は ops.customer_industries。値は主業界の industry_id(値空間統一済み)。dwh ETL の切替完了後のバージョンで削除する';
