@@ -10,6 +10,7 @@ import {
   SYSTEM_PROMPT,
 } from '@ai-manager/shared';
 import type pg from 'pg';
+import { fetchTodayEventsText } from '../calendar.js';
 
 export interface JobSummary {
   sent: number;
@@ -35,6 +36,7 @@ function staticMorningMessage(tasksSummary: string): string {
 interface MemberRow {
   user_id: string;
   display_name: string;
+  email: string;
   chat_space_id: string | null;
 }
 
@@ -60,7 +62,7 @@ export async function runMorningCheckin(pool: pg.Pool): Promise<JobSummary> {
 
   const members = await query<MemberRow>(
     pool,
-    `SELECT user_id, display_name, chat_space_id
+    `SELECT user_id, display_name, email, chat_space_id
      FROM ops.users WHERE active AND role = 'member'`,
   );
 
@@ -109,6 +111,11 @@ export async function runMorningCheckin(pool: pg.Pool): Promise<JobSummary> {
               })
               .join('\n');
 
+      // カレンダー(CALENDAR_ENABLED 時のみ。失敗時は undefined でタスクのみにフォールバック)
+      const calendarText = await fetchTodayEventsText(member.email);
+      const calendarBlock =
+        calendarText === undefined ? '' : `\n本日の予定:\n${calendarText}`;
+
       let messageText: string;
       let modelUsed: string | undefined;
       let inputTokens = 0;
@@ -121,7 +128,7 @@ export async function runMorningCheckin(pool: pg.Pool): Promise<JobSummary> {
           messages: [
             {
               role: 'user',
-              text: `メンバー: ${member.display_name}\n本日のタスク状況:\n${tasksSummary}`,
+              text: `メンバー: ${member.display_name}\n本日のタスク状況:\n${tasksSummary}${calendarBlock}`,
             },
           ],
         });

@@ -8,6 +8,7 @@ import {
 import type http from 'node:http';
 import type pg from 'pg';
 import { verifySchedulerRequest } from './auth.js';
+import { runAnomalyScan } from './jobs/anomaly-scan.js';
 import { runDailyReport } from './jobs/daily-report.js';
 import { runKnowledgeSync } from './jobs/knowledge-sync.js';
 import { runMorningCheckin, type JobSummary } from './jobs/morning-checkin.js';
@@ -20,6 +21,7 @@ export const JOBS: Record<string, JobRunner> = {
   'daily-report': runDailyReport,
   'weekly-summary': runWeeklySummary,
   'knowledge-sync': runKnowledgeSync,
+  'anomaly-scan': runAnomalyScan,
 };
 
 /**
