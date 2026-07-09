@@ -1,0 +1,13 @@
+node_modules
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+.git
+.github
+.ai-native
+docs
+scripts
+*.md
+.env
+.env.*
+deploy-config.json

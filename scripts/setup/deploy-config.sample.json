@@ -1,0 +1,15 @@
+{
+  "//": "deploy-config.json のサンプル。bootstrap-gcp.ps1 が実値入りで自動生成する。手書きする場合はこのファイルを deploy-config.json にコピーして編集する(deploy-config.json は .gitignore 済み)",
+  "GCP_PROJECT_ID": "my-gcp-project",
+  "GCP_PROJECT_NUMBER": "123456789012",
+  "GCP_REGION": "asia-northeast1",
+  "GCP_WORKLOAD_IDENTITY_PROVIDER": "projects/123456789012/locations/global/workloadIdentityPools/github-pool/providers/github-provider",
+  "GCP_DEPLOY_SERVICE_ACCOUNT": "ai-manager-deployer@my-gcp-project.iam.gserviceaccount.com",
+  "GCP_RUNTIME_SERVICE_ACCOUNT": "ai-manager-runtime@my-gcp-project.iam.gserviceaccount.com",
+  "GCP_ARTIFACT_REPOSITORY": "ai-manager",
+  "GCP_VPC_CONNECTOR": "",
+  "ADMIN_SPACE_ID": "",
+  "KNOWLEDGE_DRIVE_FOLDER_ID": "",
+  "DASHBOARD_AUTH_MODE": "iap",
+  "DASHBOARD_IAP_AUDIENCE": ""
+}
