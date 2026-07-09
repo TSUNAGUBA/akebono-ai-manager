@@ -199,7 +199,7 @@ gcloud compute addresses describe ai-manager-egress-ip --region asia-northeast1 
 | `VERTEX_LOCATION` | — | 生成系モデルの呼び出し先(既定 `global`)。データレジデンシー要件がある場合のみリージョンを指定 |
 | `VERTEX_EMBEDDING_LOCATION` | — | embedding の呼び出し先(既定 `GCP_REGION`) |
 | `MODEL_FLASH_LITE` / `MODEL_FLASH` / `MODEL_PRO` | — | 各モデル階層のモデル名上書き(既定 `gemini-2.5-flash-lite` / `gemini-2.5-flash` / `gemini-2.5-pro`)。**Gemini 2.5 系は 2026-10-16 に廃止予定**のため、後継(例: `gemini-3.1-flash-lite`)への移行はこの secrets の変更+再デプロイだけで完了する |
-| `MODEL_PRICING_JSON` | — | コスト概算の単価上書き(`{"モデル名":{"input":X,"output":Y}}`、USD/100万トークン)。`MODEL_*` でモデルを差し替えた際はこれも登録しないとコスト監視(v_ai_cost)が 0 になる(起動ログに警告が出る) |
+| `MODEL_PRICING_JSON` | — | コスト概算の単価上書き(`{"モデル名":{"input":X,"output":Y}}`、USD/100万トークン)。`MODEL_*` でモデルを差し替えた際はこれも登録しないとコスト監視(v_ai_cost)が 0 になる(未登録モデルの初回 AI 呼び出し時にサービスログへ警告が出る) |
 | `EMBEDDING_MODEL` | — | embedding モデル名上書き(既定 `gemini-embedding-001`)。**変更すると既存ベクトルと互換がなくなるため、rag スキーマの全件再同期が必要**。次元数(`EMBEDDING_DIMENSIONS`)は rag スキーマの vector(768) と結合しているため意図的に secrets 配線していない(変更はスキーマ変更を伴う) |
 
 > **任意 secrets を既定値に戻すには**: 空値での上書きはできない(空はスキップされる)ため、

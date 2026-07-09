@@ -68,8 +68,8 @@ export interface VertexConfig {
   projectId: string;
   /**
    * 生成系モデル(generateContent)の呼び出し先ロケーション。既定は 'global'。
-   * gemini-2.5-flash-lite 等はグローバルエンドポイント限定提供のため、
-   * リージョナルエンドポイントに投げると HTTP 404(AIM-4001)になる。
+   * gemini-2.5-flash-lite 等は asia-northeast1 では未提供(グローバルでは提供)のため、
+   * 未提供のリージョナルエンドポイントに投げると HTTP 404(AIM-4001)になる。
    * データレジデンシー要件がある場合は VERTEX_LOCATION でリージョンを指定し、
    * そのリージョンで提供されているモデルを MODEL_* で選ぶこと。
    */
