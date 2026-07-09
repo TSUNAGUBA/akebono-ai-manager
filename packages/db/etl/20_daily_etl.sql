@@ -1,9 +1,10 @@
 -- ops → dwh 日次 ETL(要件 7.3)。pg_cron から毎日深夜(02:30 JST)に実行する。
--- repeatable マイグレーション: 内容変更で再適用される。
+-- repeatable マイグレーション: 毎回適用(冪等)。
 --
 -- 冪等性の設計(CLAUDE.md 原則2):
 --   - 対象日のファクトは DELETE → INSERT で洗い替え(他の日付には触れない)
 --   - fact_ai_suggestion / fact_escalation は後日の決定・解決を反映するため直近7日を洗い替え
+--   - fact_hypothesis_outcome も翌日以降の振り返り完了を反映するため直近7日を洗い替え
 --   - fact_workload はスナップショットを UPSERT
 --   - ディメンションは SCD Type 2(変更検知→現行行クローズ+新行追加)
 
@@ -163,6 +164,16 @@ BEGIN
       AND ((d2.dialogue_id = m.dialogue_id AND d2.created_at = m.created_at)
            OR d2.dialogue_type = 'completion_review')
       AND (m.task_id IS NULL OR d2.task_id IS NULL OR d2.task_id = m.task_id)
+      -- 振り返りは「直近の朝仮説」にのみ帰属させる:
+      -- m と d2 の間により新しい朝の対話がある場合、この review は m とペアにしない
+      -- (1つの review が複数日の仮説に二重帰属して outcomes が過大計上されるのを防ぐ)
+      AND NOT EXISTS (
+        SELECT 1 FROM ops.dialogues m2
+        WHERE m2.user_id = m.user_id
+          AND m2.dialogue_type = 'morning_checkin'
+          AND m2.created_at > m.created_at
+          AND m2.created_at <= d2.created_at
+      )
     ORDER BY d2.created_at
     LIMIT 1
   ) r ON TRUE
