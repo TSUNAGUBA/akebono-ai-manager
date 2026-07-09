@@ -1,6 +1,7 @@
 # Phase 1 実装設計
 
-- 上位ドキュメント: [docs/refference/ai-manager-requirements-design.md](../refference/ai-manager-requirements-design.md)(要件・基本設計の SoT)
+- 上位ドキュメント: [docs/refference/ai-manager-requirements-design.md](../refference/ai-manager-requirements-design.md)(要件・基本設計の SoT。v0.2)
+- 追補: [ai-manager-requirements-v0.3-addendum.md](../refference/ai-manager-requirements-v0.3-addendum.md)(マスタ管理・顧客間関係・ナレッジスコープ。未実装の要件)
 - 本書: Phase 1 実装のスコープ決定・アーキテクチャ・設計判断(ADR)を記録する
 
 ## 1. 実装スコープ
