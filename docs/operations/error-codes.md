@@ -35,7 +35,7 @@
 
 | コード | 意味 | 主な対処 |
 |---|---|---|
-| AIM-4001 | Vertex AI 呼び出し失敗 | Vertex AI API の有効化、ランタイム SA の `roles/aiplatform.user`、モデル名を確認 |
+| AIM-4001 | Vertex AI 呼び出し失敗 | Vertex AI API の有効化、ランタイム SA の `roles/aiplatform.user`、モデル名を確認。HTTP 404(`Publisher model ... was not found`)はモデルが呼び出し先ロケーションで未提供 — `VERTEX_LOCATION` / `MODEL_*` の組み合わせを見直す(deployment-setup.md トラブルシューティング参照) |
 | AIM-4002 | LLM 応答が不正(空・JSON 解析不能) | 一時的な場合はリトライで解消。頻発時はプロンプト/スキーマを確認 |
 | AIM-4003 | Embedding 失敗 | `EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS`(rag スキーマの vector(768) と一致)を確認 |
 

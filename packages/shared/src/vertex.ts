@@ -33,6 +33,23 @@ export interface GenerateResult {
   costUsd: number;
 }
 
+/**
+ * Vertex AI の呼び出し URL を組み立てる。
+ * location='global' はグローバルエンドポイント(ホスト名にリージョンプレフィックスなし)。
+ * モデルごとに提供ロケーションが異なり、未提供のロケーションに投げると HTTP 404 になる
+ * (例: gemini-2.5-flash-lite はグローバル限定、gemini-embedding-001 はリージョナル提供あり)。
+ */
+export function vertexEndpointUrl(
+  location: string,
+  projectId: string,
+  model: string,
+  method: 'generateContent' | 'predict',
+): string {
+  const host =
+    location === 'global' ? 'aiplatform.googleapis.com' : `${location}-aiplatform.googleapis.com`;
+  return `https://${host}/v1/projects/${projectId}/locations/${location}/publishers/google/models/${model}:${method}`;
+}
+
 export function resolveModel(tier: ModelTier, config: VertexConfig): string {
   switch (tier) {
     case 'flash-lite':
@@ -113,7 +130,7 @@ export async function generateContent(
   config: VertexConfig = loadVertexConfig(),
 ): Promise<GenerateResult> {
   const model = resolveModel(options.tier, config);
-  const url = `https://${config.region}-aiplatform.googleapis.com/v1/projects/${config.projectId}/locations/${config.region}/publishers/google/models/${model}:generateContent`;
+  const url = vertexEndpointUrl(config.location, config.projectId, model, 'generateContent');
 
   const generationConfig: Record<string, unknown> = {
     temperature: options.temperature ?? 0.4,
@@ -187,7 +204,12 @@ export async function embedTexts(
   config: VertexConfig = loadVertexConfig(),
 ): Promise<number[][]> {
   if (texts.length === 0) return [];
-  const url = `https://${config.region}-aiplatform.googleapis.com/v1/projects/${config.projectId}/locations/${config.region}/publishers/google/models/${config.embedding.model}:predict`;
+  const url = vertexEndpointUrl(
+    config.embeddingLocation,
+    config.projectId,
+    config.embedding.model,
+    'predict',
+  );
 
   const results: number[][] = [];
   for (const [i, text] of texts.entries()) {

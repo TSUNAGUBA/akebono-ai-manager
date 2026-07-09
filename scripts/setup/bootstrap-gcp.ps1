@@ -201,6 +201,11 @@ $config = [ordered]@{
   KNOWLEDGE_DRIVE_FOLDER_ID      = ''
   DASHBOARD_AUTH_MODE            = 'iap'
   DASHBOARD_IAP_AUDIENCE         = ''
+  VERTEX_LOCATION                = ''
+  VERTEX_EMBEDDING_LOCATION      = ''
+  MODEL_FLASH_LITE               = ''
+  MODEL_FLASH                    = ''
+  MODEL_PRO                      = ''
 }
 $config | ConvertTo-Json | Set-Content -Path $OutputConfigPath -Encoding utf8
 
