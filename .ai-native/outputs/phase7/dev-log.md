@@ -45,3 +45,11 @@ ADR-1〜5 を docs/architecture/phase1-implementation.md に記録
 | AIM-4001: Vertex AI HTTP 404(`gemini-2.5-flash-lite` not found) | モデルごとに提供ロケーションが異なり、gemini-2.5-flash-lite は asia-northeast1 リージョナルでは未提供(グローバルエンドポイントでは提供)だった | 生成系は既定 global エンドポイント、embedding は既定リージョナルに分離(ADR-8)。`VERTEX_LOCATION` / `VERTEX_EMBEDDING_LOCATION` / `MODEL_*` を secrets 経由で運用変更可能に配線 |
 
 Gemini 2.5 系は 2026-10-16 廃止予定。後継移行は `MODEL_*` secrets の変更+再デプロイのみで完了する(コード変更不要)。単価表の追従は `MODEL_PRICING_JSON` secret(配線済み)で行う。
+
+## MVP 公開モードの追加(2026-07-09、ADR-9)
+
+LB+IAP は MVP には過剰(ドメイン・月額固定費)というオペレーター判断を受け、
+`DASHBOARD_EXPOSURE` secret で公開モードを切替可能にした。
+`direct-iap` = Cloud Run 直付け IAP(GA・LB 不要・追加費用なし)で `*.run.app` URL を保護。
+AUTH_MODE 既定は公開モードから導出(lb-iap→iap / direct-iap→header)。
+IAP 有効化前は --no-allow-unauthenticated により全拒否のフェイルクローズ。

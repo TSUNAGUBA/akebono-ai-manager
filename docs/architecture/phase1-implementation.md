@@ -73,7 +73,7 @@ sequenceDiagram
 |---|---|
 | Google Chat → chat-gateway | Chat 発行 JWT の署名・発行者・audience(プロジェクト番号)検証 |
 | Cloud Scheduler → batch | Cloud Run IAM(--no-allow-unauthenticated)+アプリ層 OIDC 検証(発行者・audience・呼び出し元 SA)の多層防御 |
-| ブラウザ → dashboard | ingress を LB(IAP)経由のみに制限+IAP JWT の署名検証(AUTH_MODE=iap)の多層防御。ロール(admin/member)は ops.users で解決し、管理者限定ページを分離 |
+| ブラウザ → dashboard | `lb-iap`(既定): ingress を LB(IAP)経由のみに制限+IAP JWT の署名検証(AUTH_MODE=iap)。`direct-iap`(MVP): Cloud Run 直付け IAP+`--no-allow-unauthenticated`+IAP 付与ヘッダー(AUTH_MODE=header)。いずれも多層防御で、ロール(admin/member)は ops.users で解決し管理者限定ページを分離 |
 | GitHub Actions → GCP | Workload Identity Federation(キーレス)。attribute-condition で対象リポジトリに限定 |
 | アプリ → RDS | SSL 必須+CA 検証、DB ユーザー分離(ai_manager_app_rw / ai_manager_dashboard_ro / 管理)、ai_manager_dashboard_ro は生の対話ログ参照不可 |
 
@@ -148,6 +148,25 @@ sequenceDiagram
   (repository secrets)で差し替えられるため、後継移行はコード変更なしで完了する。
   単価表(`shared/vertex.ts`)は `MODEL_PRICING_JSON`(同じく secrets 配線済み)で追従させる。
   未登録モデルはコスト 0 で記録され、起動後の初回呼び出しで警告ログが出る
+
+### ADR-9: ダッシュボードの公開モードを二段構え(direct-iap / lb-iap)にする
+
+- **決定**: `DASHBOARD_EXPOSURE`(repository secret)で公開モードを切り替える。
+  MVP は `direct-iap`(Cloud Run 直付け IAP。`--ingress all` + `--no-allow-unauthenticated`、AUTH_MODE 既定 header)、
+  本番は `lb-iap`(既定。LB+IAP、`--ingress internal-and-cloud-load-balancing`、AUTH_MODE 既定 iap)
+- **理由**: LB+IAP は独自ドメイン・マネージド証明書・月額固定費(転送ルール約 $20)を要し、MVP には過剰。
+  Cloud Run 直付け IAP(GA)は追加費用なしで `*.run.app` URL に Google ログインを付けられる。
+  `direct-iap` の AUTH_MODE=header は「全経路が IAP を通る」場合のみ安全であり、
+  IAP 有効化(手動一回)前は `--no-allow-unauthenticated` により全拒否となるフェイルクローズ設計
+- **トレードオフ**: `direct-iap` はアプリ層の IAP JWT 署名検証を伴わない(IAP 付与ヘッダーの信頼)。
+  独自ドメイン・Cloud Armor 等が必要になった時点で `lb-iap` へ移行する(secret 変更+audience 登録+再デプロイ、
+  および**サービス直付け IAP の解除 `--no-iap`** — 残すと二重 IAP になり LB 用 audience の検証が恒常的に失敗する。
+  手順は deployment-setup.md Step 7-4 B)
+- **備考**: IAP の有効/無効は deploy.yml で宣言的に管理しない(`gcloud run deploy` は IAP 状態を変更しないため
+  手動切替が再デプロイで巻き戻ることはない)。`--iap` は IAP API 有効化・サービスエージェントへの
+  invoker 付与という手動前提を要し、deploy.yml に含めると前提未達でデプロイ全体が失敗するため、
+  一回きりの手動操作とし、誤設定はデプロイ時の fail-fast(direct-iap × AUTH_MODE=iap × audience 未設定。
+  lb-iap では LB 構築前の初期状態として意図的に許容)で検出する
 
 ## 6. 未決事項(要件 §13)への Phase 1 時点の回答
 
