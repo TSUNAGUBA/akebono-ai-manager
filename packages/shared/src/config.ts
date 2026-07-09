@@ -1,4 +1,5 @@
 import { AppError, ERROR_CODES } from './errors.js';
+import { logger } from './logger.js';
 
 /** 必須の環境変数を読む。未設定なら AIM-1001。 */
 export function requireEnv(name: string): string {
@@ -61,6 +62,40 @@ export function loadDbConfig(): DbConfig {
     sslMode,
     sslCaPath: process.env['DB_SSL_CA'],
     poolMax: optionalIntEnv('DB_POOL_MAX', 2),
+  };
+}
+
+/**
+ * マスタ管理(ダッシュボード管理者限定ページ)用の管理 DB 接続設定(要件 v0.3 §5.1)。
+ * 専用ロール ai_manager_admin_rw で接続し、マスタ 4 表+ops.customers のみ書込可能な
+ * 二重制御(アプリ層 role=admin 判定+DB ロール分離)の DB 側を担う。
+ *
+ * DB_ADMIN_USER / DB_ADMIN_PASSWORD が両方設定されている場合のみ有効。
+ * 未設定なら undefined を返し、マスタ管理ページは案内表示に切り替わる
+ * (グレースフルデグラデーション。既存の閲覧機能には影響しない)。
+ * 接続先・SSL 等その他の設定は既存の DB 設定(loadDbConfig)を継承する。
+ */
+export function loadAdminDbConfig(): DbConfig | undefined {
+  const user = process.env['DB_ADMIN_USER'];
+  const password = process.env['DB_ADMIN_PASSWORD'];
+  const hasUser = user !== undefined && user !== '';
+  const hasPassword = password !== undefined && password !== '';
+  if (!hasUser || !hasPassword) {
+    if (hasUser !== hasPassword) {
+      // 片方だけの設定は設定ミスの可能性が高いが、閲覧機能を止めないため警告に留める
+      logger.warn(
+        'DB_ADMIN_USER / DB_ADMIN_PASSWORD は片方のみ設定されています。マスタ管理は未構成として扱います',
+        { errorCode: ERROR_CODES.ADMIN_DB_NOT_CONFIGURED },
+      );
+    }
+    return undefined;
+  }
+  return {
+    ...loadDbConfig(),
+    user,
+    password,
+    // 管理操作は低頻度のため接続数は既定 2 に絞る(接続数暴発の防止は要件 6.3 と同旨)
+    poolMax: optionalIntEnv('DB_ADMIN_POOL_MAX', 2),
   };
 }
 
