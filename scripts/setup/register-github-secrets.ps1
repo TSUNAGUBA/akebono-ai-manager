@@ -84,15 +84,16 @@ foreach ($key in ($requiredKeys + $optionalKeys)) {
   }
   # PS 5.1 は引数内の二重引用符をエスケープせず渡すため、--body "$value" では
   # MODEL_PRICING_JSON 等の JSON 値の引用符が剥がれて壊れる。
-  # 改行なしの一時ファイル経由(--body-file)で登録する(register-gcp-runtime-secrets.ps1 と同方式)
-  $tmp = New-TemporaryFile
+  # 標準入力経由で登録する(--body 未指定時は stdin から読む仕様。
+  # gh 2.5.0+ はパイプで付加される末尾改行を自動除去する)
+  $prevOutputEncoding = $OutputEncoding
   try {
-    [System.IO.File]::WriteAllText($tmp.FullName, [string]$value)
-    & gh secret set $key --repo $Repo --body-file $tmp.FullName
+    $OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+    [string]$value | & gh secret set $key --repo $Repo
     if ($LASTEXITCODE -ne 0) { throw "secret $key の登録に失敗しました" }
   }
   finally {
-    Remove-Item $tmp.FullName -Force -ErrorAction SilentlyContinue
+    $OutputEncoding = $prevOutputEncoding
   }
   Write-Host "  登録済み: $key"
 }
