@@ -1,0 +1,64 @@
+name: "意思決定記録 / Decision Record"
+description: "重要な意思決定を記録"
+labels: ["decision"]
+body:
+  - type: dropdown
+    id: phase
+    attributes:
+      label: "フェーズ"
+      options:
+        - "Phase 0: 現状把握と目標設定"
+        - "Phase 1: 真の課題の追求"
+        - "Phase 2: 業務と実運用の明確化"
+        - "Phase 3: 要件定義"
+        - "Phase 4: 技術スタック確定"
+        - "Phase 5: 基本設計 + プロトタイプ開発"
+        - "Phase 6: プロトタイプベースのフィードバック"
+        - "Phase 7: MVP構築"
+        - "Phase 8: フルスケール実装"
+    validations:
+      required: true
+  - type: dropdown
+    id: category
+    attributes:
+      label: "カテゴリ"
+      options:
+        - "課題定義"
+        - "ユースケース"
+        - "要件決定"
+        - "技術選定"
+        - "設計方針"
+        - "フィードバック対応"
+        - "実装判断"
+        - "品質判断"
+        - "安全判断"
+        - "差し戻し"
+    validations:
+      required: true
+  - type: textarea
+    id: decision
+    attributes:
+      label: "意思決定の内容"
+      description: "何を決めたか"
+    validations:
+      required: true
+  - type: textarea
+    id: reasoning
+    attributes:
+      label: "判断理由"
+      description: "なぜそう判断したか。検討した選択肢とトレードオフがあれば記載"
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: "影響範囲"
+      description: "この決定が影響する範囲（機能、ユースケース、設計、他の意思決定など）"
+    validations:
+      required: true
+  - type: input
+    id: decided-by
+    attributes:
+      label: "判断者"
+    validations:
+      required: true

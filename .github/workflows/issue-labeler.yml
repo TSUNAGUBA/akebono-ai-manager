@@ -1,0 +1,100 @@
+name: Issue自動ラベリング / Issue Auto-Labeler
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+
+jobs:
+  auto-label:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Auto-label issue based on template fields
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_LABELS: ${{ toJSON(github.event.issue.labels.*.name) }}
+        run: |
+          LABELS_TO_ADD=""
+
+          # 指定された見出しの次の行の値を取得する関数
+          extract_field() {
+            local heading="$1"
+            echo "$ISSUE_BODY" | sed -n "/^### ${heading}/,/^###/{/^### ${heading}/d;/^###/d;/^$/d;p;}" | head -1
+          }
+
+          # Phase番号を抽出する関数（"Phase 3: 要件定義" → "3"）
+          extract_phase_number() {
+            local value="$1"
+            if echo "$value" | grep -qE "Phase [0-8]"; then
+              echo "$value" | grep -oE "Phase [0-8]" | grep -oE "[0-8]"
+            elif echo "$value" | grep -q "Phase 0-2"; then
+              echo "0"
+            fi
+          }
+
+          # --- feature テンプレート ---
+          if echo "$ISSUE_LABELS" | grep -q '"feature"'; then
+            # フェーズラベル
+            phase_value=$(extract_field "関連フェーズ")
+            phase_num=$(extract_phase_number "$phase_value")
+            if [ -n "$phase_num" ]; then
+              LABELS_TO_ADD="${LABELS_TO_ADD:+${LABELS_TO_ADD},}phase:${phase_num}"
+            fi
+
+            # 優先度ラベル
+            priority_value=$(extract_field "優先度")
+            case "$priority_value" in
+              *高*) LABELS_TO_ADD="${LABELS_TO_ADD:+${LABELS_TO_ADD},}priority:high" ;;
+              *中*) LABELS_TO_ADD="${LABELS_TO_ADD:+${LABELS_TO_ADD},}priority:medium" ;;
+              *低*) LABELS_TO_ADD="${LABELS_TO_ADD:+${LABELS_TO_ADD},}priority:low" ;;
+            esac
+          fi
+
+          # --- bug テンプレート ---
+          if echo "$ISSUE_LABELS" | grep -q '"bug"'; then
+            severity_value=$(extract_field "深刻度")
+            case "$severity_value" in
+              *CRITICAL*) LABELS_TO_ADD="${LABELS_TO_ADD:+${LABELS_TO_ADD},}priority:high" ;;
+              *WARNING*)  LABELS_TO_ADD="${LABELS_TO_ADD:+${LABELS_TO_ADD},}priority:medium" ;;
+              *INFO*)     LABELS_TO_ADD="${LABELS_TO_ADD:+${LABELS_TO_ADD},}priority:low" ;;
+            esac
+          fi
+
+          # --- phase-gate テンプレート ---
+          if echo "$ISSUE_LABELS" | grep -q '"phase-gate"'; then
+            # フェーズラベル
+            phase_value=$(extract_field "対象フェーズ")
+            phase_num=$(extract_phase_number "$phase_value")
+            if [ -n "$phase_num" ]; then
+              LABELS_TO_ADD="${LABELS_TO_ADD:+${LABELS_TO_ADD},}phase:${phase_num}"
+            fi
+
+            # ゲート判定ラベル
+            judgment_value=$(extract_field "ゲート判定")
+            case "$judgment_value" in
+              *PASS*)     LABELS_TO_ADD="${LABELS_TO_ADD:+${LABELS_TO_ADD},}gate:pass" ;;
+              *NOT\ YET*) LABELS_TO_ADD="${LABELS_TO_ADD:+${LABELS_TO_ADD},}gate:not-yet" ;;
+            esac
+          fi
+
+          # --- decision テンプレート ---
+          if echo "$ISSUE_LABELS" | grep -q '"decision"'; then
+            phase_value=$(extract_field "フェーズ")
+            phase_num=$(extract_phase_number "$phase_value")
+            if [ -n "$phase_num" ]; then
+              LABELS_TO_ADD="${LABELS_TO_ADD:+${LABELS_TO_ADD},}phase:${phase_num}"
+            fi
+          fi
+
+          # ラベルを付与
+          if [ -n "$LABELS_TO_ADD" ]; then
+            gh issue edit "$ISSUE_NUMBER" --add-label "$LABELS_TO_ADD"
+            echo "ラベルを付与しました: $LABELS_TO_ADD"
+          else
+            echo "付与するラベルはありませんでした"
+          fi

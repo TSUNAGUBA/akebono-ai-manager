@@ -1,0 +1,81 @@
+name: PRチェック / PR Checks
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  validate-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate PR and post feedback comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          COMMENT_MARKER="<!-- ai-native-pr-check -->"
+          WARNINGS=""
+          PASSED=""
+
+          # --- Issue参照チェック ---
+          if echo "$PR_BODY" | grep -qE '#[0-9]+'; then
+            PASSED="${PASSED}\n- Issue参照: OK (関連Issueへの参照があります)"
+          else
+            WARNINGS="${WARNINGS}\n- **Issue参照なし:** PR本文に関連Issueへの参照 (例: \`#123\`, \`Closes #123\`) を追加してください"
+          fi
+
+          # --- セルフチェックリスト確認 ---
+          CHECKED=$(echo "$PR_BODY" | grep -c '\- \[x\]' || true)
+          UNCHECKED=$(echo "$PR_BODY" | grep -c '\- \[ \]' || true)
+          TOTAL=$((CHECKED + UNCHECKED))
+
+          if [ "$TOTAL" -eq 0 ]; then
+            WARNINGS="${WARNINGS}\n- **チェックリストなし:** セルフチェック項目が見つかりません。PRテンプレートのチェックリストを使用してください"
+          elif [ "$UNCHECKED" -gt 0 ]; then
+            WARNINGS="${WARNINGS}\n- **未チェック項目あり:** セルフチェックが ${CHECKED}/${TOTAL} 完了です。レビュー依頼前にすべての項目を確認してください"
+          else
+            PASSED="${PASSED}\n- セルフチェック: OK (${CHECKED}/${TOTAL} 完了)"
+          fi
+
+          # --- コメント本文を組み立て ---
+          COMMENT_BODY="${COMMENT_MARKER}
+          ## PR チェック結果
+          "
+
+          if [ -n "$WARNINGS" ]; then
+            COMMENT_BODY="${COMMENT_BODY}
+          ### 要確認
+          $(echo -e "$WARNINGS")
+          "
+          fi
+
+          if [ -n "$PASSED" ]; then
+            COMMENT_BODY="${COMMENT_BODY}
+          ### 確認済み
+          $(echo -e "$PASSED")
+          "
+          fi
+
+          COMMENT_BODY="${COMMENT_BODY}
+          ---
+          *このコメントはPR作成・更新時に自動生成されます。*"
+
+          # --- 既存コメントを検索して更新 or 新規作成 ---
+          EXISTING_COMMENT_ID=$(gh api "repos/${GH_REPO}/issues/${PR_NUMBER}/comments" \
+            --jq ".[] | select(.body | contains(\"${COMMENT_MARKER}\")) | .id" \
+            | head -1)
+
+          if [ -n "$EXISTING_COMMENT_ID" ]; then
+            gh api "repos/${GH_REPO}/issues/comments/${EXISTING_COMMENT_ID}" \
+              --method PATCH \
+              --field body="$COMMENT_BODY"
+            echo "既存コメントを更新しました (ID: ${EXISTING_COMMENT_ID})"
+          else
+            gh pr comment "$PR_NUMBER" --body "$COMMENT_BODY"
+            echo "新規コメントを投稿しました"
+          fi

@@ -1,0 +1,54 @@
+name: "フェーズゲート判定 / Phase Gate"
+description: "フェーズのゲート判定を記録"
+labels: ["phase-gate"]
+body:
+  - type: dropdown
+    id: phase
+    attributes:
+      label: "対象フェーズ"
+      options:
+        - "Phase 0: 現状把握と目標設定"
+        - "Phase 1: 真の課題の追求"
+        - "Phase 2: 業務と実運用の明確化"
+        - "Phase 0-2: 総合ゲート"
+        - "Phase 3: 要件定義"
+        - "Phase 4: 技術スタック確定"
+        - "Phase 5: 基本設計 + プロトタイプ開発"
+        - "Phase 6: プロトタイプベースのフィードバック"
+        - "Phase 7: MVP構築"
+        - "Phase 8: フルスケール実装"
+    validations:
+      required: true
+  - type: dropdown
+    id: judgment
+    attributes:
+      label: "ゲート判定"
+      options:
+        - "PASS"
+        - "NOT YET"
+    validations:
+      required: true
+  - type: textarea
+    id: gate-conditions
+    attributes:
+      label: "ゲート条件の達成状況"
+      description: "各ゲート条件の達成状況を記載"
+      placeholder: |
+        - [x] 条件1: （達成内容）
+        - [ ] 条件2: （未達内容と残課題）
+    validations:
+      required: true
+  - type: textarea
+    id: reasoning
+    attributes:
+      label: "判定理由"
+      description: "PASS/NOT YETの具体的な理由"
+    validations:
+      required: true
+  - type: textarea
+    id: next-action
+    attributes:
+      label: "次のアクション"
+      description: "PASSの場合は次フェーズの概要。NOT YETの場合はやるべきこと"
+    validations:
+      required: true

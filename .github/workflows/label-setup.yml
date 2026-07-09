@@ -1,0 +1,58 @@
+name: ラベル一括セットアップ / Label Setup
+
+on:
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+jobs:
+  create-labels:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create all project labels
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # フェーズラベル（Phase labels）
+          gh label create "phase:0" --color "0E8A16" --description "Phase 0: 現状把握と目標設定" --force
+          gh label create "phase:1" --color "0E8A16" --description "Phase 1: 真の課題の追求" --force
+          gh label create "phase:2" --color "0E8A16" --description "Phase 2: 業務と実運用の明確化" --force
+          gh label create "phase:3" --color "1D76DB" --description "Phase 3: 要件定義" --force
+          gh label create "phase:4" --color "1D76DB" --description "Phase 4: 技術スタック確定" --force
+          gh label create "phase:5" --color "5319E7" --description "Phase 5: 基本設計 + プロトタイプ開発" --force
+          gh label create "phase:6" --color "5319E7" --description "Phase 6: プロトタイプベースのフィードバック" --force
+          gh label create "phase:7" --color "B60205" --description "Phase 7: MVP構築" --force
+          gh label create "phase:8" --color "B60205" --description "Phase 8: フルスケール実装" --force
+
+          # 種別ラベル（Type labels）
+          gh label create "feature" --color "0075CA" --description "機能要件" --force
+          gh label create "bug" --color "D73A4A" --description "バグ" --force
+          gh label create "phase-gate" --color "FEF2C0" --description "フェーズゲート判定" --force
+          gh label create "decision" --color "D4C5F9" --description "意思決定記録" --force
+          gh label create "review" --color "FBCA04" --description "レビュー関連" --force
+          gh label create "audit" --color "E4E669" --description "監査関連" --force
+          gh label create "feedback" --color "C2E0C6" --description "フィードバック" --force
+          gh label create "blocker" --color "B60205" --description "ブロッカー" --force
+
+          # 優先度ラベル（Priority labels）
+          gh label create "priority:high" --color "B60205" --description "高優先度" --force
+          gh label create "priority:medium" --color "FBCA04" --description "中優先度" --force
+          gh label create "priority:low" --color "0E8A16" --description "低優先度" --force
+
+          # ロールラベル（Role labels）
+          gh label create "role:coding-agent" --color "1D76DB" --description "コーディングエージェント担当" --force
+          gh label create "role:code-reviewer" --color "5319E7" --description "コードレビュアー担当" --force
+          gh label create "role:system-auditor" --color "0E8A16" --description "システム監査官担当" --force
+          gh label create "role:user-support" --color "C2E0C6" --description "ユーザー・運用サポート担当" --force
+          gh label create "role:pm" --color "FBCA04" --description "PM・スクラムマスター担当" --force
+
+          # ゲート状態ラベル（Gate status labels）
+          gh label create "gate:pass" --color "0E8A16" --description "ゲート通過" --force
+          gh label create "gate:not-yet" --color "D73A4A" --description "ゲート未達" --force
+          gh label create "gate:reject" --color "D93F0B" --description "差し戻しリクエスト" --force
+          gh label create "quality-gate" --color "5319E7" --description "品質ゲート対象" --force
+          gh label create "safety-gate" --color "B60205" --description "安全ゲート対象" --force
+
+          echo "30個のラベルのセットアップが完了しました"

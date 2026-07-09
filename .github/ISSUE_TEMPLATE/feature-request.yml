@@ -1,0 +1,52 @@
+name: "機能要件 / Feature Request"
+description: "新しい機能の追加や既存機能の拡張"
+labels: ["feature"]
+body:
+  - type: dropdown
+    id: phase
+    attributes:
+      label: "関連フェーズ"
+      description: "この機能が関連するフェーズを選択"
+      options:
+        - "Phase 3: 要件定義"
+        - "Phase 5: 基本設計"
+        - "Phase 7: MVP構築"
+        - "Phase 8: フルスケール実装"
+    validations:
+      required: true
+  - type: textarea
+    id: requirement
+    attributes:
+      label: "要件"
+      description: "何を実現したいか。Phase 3の要件定義に基づいて記述"
+      placeholder: "ユーザーが〇〇画面で△△を入力すると、□□が表示される"
+    validations:
+      required: true
+  - type: textarea
+    id: use-case
+    attributes:
+      label: "関連ユースケース"
+      description: "Phase 2で定義したユースケースとの対応"
+      placeholder: "ユースケース #X: （ユースケース名）"
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance-criteria
+    attributes:
+      label: "受け入れ条件"
+      description: "この機能が完了したと判断する条件"
+      placeholder: |
+        - [ ] 条件1
+        - [ ] 条件2
+    validations:
+      required: true
+  - type: dropdown
+    id: priority
+    attributes:
+      label: "優先度"
+      options:
+        - "高（MVP必須）"
+        - "中（リリースまでに必要）"
+        - "低（あれば望ましい）"
+    validations:
+      required: true

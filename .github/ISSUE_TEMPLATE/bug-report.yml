@@ -1,0 +1,52 @@
+name: "バグ報告 / Bug Report"
+description: "不具合の報告"
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: "バグの概要"
+      description: "何が起きているか"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: "再現手順"
+      description: "バグを再現するための手順"
+      placeholder: |
+        1. 〇〇画面を開く
+        2. △△を入力する
+        3. □□ボタンをクリックする
+        4. エラーが表示される
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: "期待する動作"
+      description: "本来どう動くべきか"
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: "実際の動作"
+      description: "実際にどうなっているか"
+    validations:
+      required: true
+  - type: dropdown
+    id: severity
+    attributes:
+      label: "深刻度"
+      options:
+        - "CRITICAL（業務が停止する）"
+        - "WARNING（回避策はあるが影響がある）"
+        - "INFO（軽微な問題）"
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: "環境情報"
+      description: "ブラウザ、OS、バージョンなど"

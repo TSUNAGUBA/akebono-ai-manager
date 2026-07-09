@@ -1,0 +1,91 @@
+name: 外部リポジトリ同期 / Sync External Repo
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_branch:
+        description: '同期元ブランチ（Source branch to sync from）'
+        required: false
+        default: 'main'
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Clone external repository
+        env:
+          SYNC_TOKEN: ${{ secrets.SYNC_REPO_TOKEN }}
+        run: |
+          git clone --branch "${{ inputs.source_branch }}" --single-branch \
+            "https://${SYNC_TOKEN}@github.com/TSUNAGUBA/ai-native-dev-training.git" \
+            /tmp/external-repo
+
+      - name: Sync files to this repository
+        run: |
+          rsync -av --delete \
+            --exclude='.git' \
+            --exclude='.github' \
+            /tmp/external-repo/ ./
+
+      - name: Check for changes
+        id: check
+        run: |
+          if git diff --quiet && [ -z "$(git status --porcelain)" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "差分なし — 同期不要です"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "差分を検出しました"
+            git diff --stat
+            echo "--- 新規ファイル ---"
+            git status --porcelain | grep '^?' || true
+          fi
+
+      - name: Create PR with changes
+        if: steps.check.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          BRANCH="sync/training-${TIMESTAMP}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git checkout -b "${BRANCH}"
+          git add -A
+          git commit -m "sync: ai-native-dev-training (${TIMESTAMP})"
+          git push -u origin "${BRANCH}"
+
+          DIFF_SUMMARY=$(git diff --stat HEAD~1)
+          gh pr create \
+            --title "sync: ai-native-dev-training からの同期 (${TIMESTAMP})" \
+            --body "$(cat <<EOF
+          ## 概要
+
+          \`TSUNAGUBA/ai-native-dev-training\` (\`${{ inputs.source_branch }}\` ブランチ) からの同期PRです。
+
+          ## 変更内容
+
+          \`\`\`
+          ${DIFF_SUMMARY}
+          \`\`\`
+
+          ## 確認事項
+
+          - [ ] 同期内容に問題がないことを確認
+          - [ ] 既存ファイルの上書きが意図通りであることを確認
+          EOF
+          )"
+
+          echo "PRを作成しました"
