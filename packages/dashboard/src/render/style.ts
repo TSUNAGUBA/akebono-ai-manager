@@ -193,6 +193,94 @@ a:hover { text-decoration: underline; }
 .error-page { max-width: 560px; margin: 80px auto; text-align: center; }
 .error-page .code { font-size: 40px; font-weight: 700; color: var(--text-muted); }
 
+/* ── 管理サブナビ(マスタ管理のタブ)── */
+.subnav {
+  display: flex;
+  gap: 2px;
+  border-bottom: 1px solid var(--border);
+  margin: 0 0 20px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.subnav a {
+  padding: 8px 14px;
+  color: var(--text-muted);
+  font-size: 14px;
+  white-space: nowrap;
+  border-bottom: 2px solid transparent;
+}
+.subnav a:hover { color: var(--text); text-decoration: none; }
+.subnav a.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+
+/* ── フラッシュメッセージ(マスタ管理の保存結果・エラー)── */
+.alert { border-radius: var(--radius); font-size: 13.5px; padding: 10px 16px; margin: 0 0 16px; }
+.alert.ok { background: var(--ok-soft); color: var(--ok); }
+.alert.error { background: var(--danger-soft); color: var(--danger); }
+
+/* ── フォーム(マスタ管理)── */
+.form .form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px 16px;
+  margin-bottom: 14px;
+}
+.form label.field { display: block; font-size: 12.5px; color: var(--text-muted); }
+.form input[type="text"],
+.form input[type="number"],
+.form textarea,
+.form select {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font: inherit;
+  font-size: 14px;
+  color: var(--text);
+  background: var(--surface);
+}
+.form input:focus, .form textarea:focus, .form select:focus {
+  outline: 2px solid var(--accent-soft);
+  border-color: var(--accent);
+}
+.form textarea { min-height: 72px; resize: vertical; }
+.form .form-help { color: var(--text-muted); font-size: 12px; margin: 6px 0 0; }
+.form .readonly-id { font-weight: 600; margin-top: 4px; }
+.check-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 6px 16px;
+  margin-top: 6px;
+}
+.check-row { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--text); padding: 4px 0; }
+.check-row input { margin: 0; }
+.check-row .sub { color: var(--text-muted); font-size: 12px; }
+.btn {
+  display: inline-block;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 18px;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.btn:hover { opacity: 0.92; }
+.btn.secondary { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
+.btn.danger {
+  background: var(--surface);
+  color: var(--danger);
+  border: 1px solid var(--danger-soft);
+  padding: 4px 12px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.btn-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.inline-form { display: inline-block; margin: 0; }
+
 /* ── モバイル ── */
 @media (max-width: 720px) {
   .container { padding: 20px 14px 48px; }

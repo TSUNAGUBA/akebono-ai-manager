@@ -157,6 +157,8 @@ jobs:
           MODEL_PRO: ${{ secrets.MODEL_PRO }}
           MODEL_PRICING_JSON: ${{ secrets.MODEL_PRICING_JSON }}
           EMBEDDING_MODEL: ${{ secrets.EMBEDDING_MODEL }}
+          KNOWLEDGE_SCOPE_HOPS: ${{ secrets.KNOWLEDGE_SCOPE_HOPS }}
+          KNOWLEDGE_SCOPE_FALLBACK: ${{ secrets.KNOWLEDGE_SCOPE_FALLBACK }}
         run: |
           VPC_FLAGS=()
           if [ -n "$GCP_VPC_CONNECTOR" ]; then
@@ -164,8 +166,9 @@ jobs:
           fi
           # MODEL_PRICING_JSON はカンマを含むため、gcloud の代替デリミタ構文(^|^)で連結する
           ENV_VARS="GCP_PROJECT_ID=${GCP_PROJECT_ID}|GCP_REGION=${GCP_REGION}|GCP_PROJECT_NUMBER=${GCP_PROJECT_NUMBER}"
-          # 任意の Vertex 設定(未設定ならコード側の既定値: 生成系 global / embedding は GCP_REGION)
-          for name in ADMIN_SPACE_ID VERTEX_LOCATION VERTEX_EMBEDDING_LOCATION MODEL_FLASH_LITE MODEL_FLASH MODEL_PRO MODEL_PRICING_JSON EMBEDDING_MODEL; do
+          # 任意の Vertex/ナレッジスコープ設定(未設定ならコード側の既定値: 生成系 global / embedding は GCP_REGION、
+          # スコープはホップ数 1・フォールバック exclude-customer)
+          for name in ADMIN_SPACE_ID VERTEX_LOCATION VERTEX_EMBEDDING_LOCATION MODEL_FLASH_LITE MODEL_FLASH MODEL_PRO MODEL_PRICING_JSON EMBEDDING_MODEL KNOWLEDGE_SCOPE_HOPS KNOWLEDGE_SCOPE_FALLBACK; do
             if [ -n "${!name}" ]; then ENV_VARS="${ENV_VARS}|${name}=${!name}"; fi
           done
           # Chat からのリクエストはアプリ層で JWT 検証するため公開エンドポイントとする
@@ -201,6 +204,13 @@ jobs:
           MODEL_PRO: ${{ secrets.MODEL_PRO }}
           MODEL_PRICING_JSON: ${{ secrets.MODEL_PRICING_JSON }}
           EMBEDDING_MODEL: ${{ secrets.EMBEDDING_MODEL }}
+          ADMIN_SPACE_ID: ${{ secrets.ADMIN_SPACE_ID }}
+          CALENDAR_ENABLED: ${{ secrets.CALENDAR_ENABLED }}
+          DELEGATION_SA_EMAIL: ${{ secrets.DELEGATION_SA_EMAIL }}
+          ANOMALY_STALL_DAYS: ${{ secrets.ANOMALY_STALL_DAYS }}
+          ANOMALY_OVERLOAD_TASKS: ${{ secrets.ANOMALY_OVERLOAD_TASKS }}
+          ANOMALY_QUALITY_MIN_SAMPLES: ${{ secrets.ANOMALY_QUALITY_MIN_SAMPLES }}
+          ANOMALY_COOLDOWN_DAYS: ${{ secrets.ANOMALY_COOLDOWN_DAYS }}
         run: |
           VPC_FLAGS=()
           if [ -n "$GCP_VPC_CONNECTOR" ]; then
@@ -208,8 +218,9 @@ jobs:
           fi
           # MODEL_PRICING_JSON はカンマを含むため、gcloud の代替デリミタ構文(^|^)で連結する
           ENV_VARS="GCP_PROJECT_ID=${GCP_PROJECT_ID}|GCP_REGION=${GCP_REGION}|BATCH_INVOKER_SA=${GCP_RUNTIME_SERVICE_ACCOUNT}"
-          # 任意の Vertex 設定(未設定ならコード側の既定値: 生成系 global / embedding は GCP_REGION)
-          for name in KNOWLEDGE_DRIVE_FOLDER_ID VERTEX_LOCATION VERTEX_EMBEDDING_LOCATION MODEL_FLASH_LITE MODEL_FLASH MODEL_PRO MODEL_PRICING_JSON EMBEDDING_MODEL; do
+          # 任意の Vertex/Chat/カレンダー/異常検知閾値の設定(未設定ならコード側の既定値。
+          # 異常検知の既定は ANOMALY_STALL_DAYS=3 / OVERLOAD_TASKS=7 / QUALITY_MIN_SAMPLES=3 / COOLDOWN_DAYS=7)
+          for name in KNOWLEDGE_DRIVE_FOLDER_ID VERTEX_LOCATION VERTEX_EMBEDDING_LOCATION MODEL_FLASH_LITE MODEL_FLASH MODEL_PRO MODEL_PRICING_JSON EMBEDDING_MODEL ADMIN_SPACE_ID CALENDAR_ENABLED DELEGATION_SA_EMAIL ANOMALY_STALL_DAYS ANOMALY_OVERLOAD_TASKS ANOMALY_QUALITY_MIN_SAMPLES ANOMALY_COOLDOWN_DAYS; do
             if [ -n "${!name}" ]; then ENV_VARS="${ENV_VARS}|${name}=${!name}"; fi
           done
           # Scheduler(OIDC)のみ呼び出し可。IAM +アプリ層検証の多層防御
@@ -244,10 +255,24 @@ jobs:
           DASHBOARD_AUTH_MODE: ${{ secrets.DASHBOARD_AUTH_MODE }}
           DASHBOARD_IAP_AUDIENCE: ${{ secrets.DASHBOARD_IAP_AUDIENCE }}
           DASHBOARD_EXPOSURE: ${{ secrets.DASHBOARD_EXPOSURE }}
+          DASHBOARD_ADMIN_DB_ENABLED: ${{ secrets.DASHBOARD_ADMIN_DB_ENABLED }}
+          DB_ADMIN_POOL_MAX: ${{ secrets.DB_ADMIN_POOL_MAX }}
         run: |
           VPC_FLAGS=()
           if [ -n "$GCP_VPC_CONNECTOR" ]; then
             VPC_FLAGS=(--vpc-connector "$GCP_VPC_CONNECTOR" --vpc-egress all-traffic)
+          fi
+          # マスタ管理 UI(v0.3)用の書込ロール接続。GCP 側シークレット
+          # (ai-manager-db-master-admin-*)の登録後に有効化する二段構え
+          # (未登録のまま参照するとデプロイが失敗するため、フラグで明示的に opt-in)
+          SET_SECRETS="DB_HOST=ai-manager-db-host:latest,DB_NAME=ai-manager-db-name:latest,DB_USER=ai-manager-db-dashboard-user:latest,DB_PASSWORD=ai-manager-db-dashboard-password:latest"
+          ADMIN_ENV=""
+          if [ "$DASHBOARD_ADMIN_DB_ENABLED" = "true" ]; then
+            SET_SECRETS="${SET_SECRETS},DB_ADMIN_USER=ai-manager-db-master-admin-user:latest,DB_ADMIN_PASSWORD=ai-manager-db-master-admin-password:latest"
+            # 管理用プールの最大接続数(任意 secret。空なら付けずコード側の既定値 2)
+            if [ -n "$DB_ADMIN_POOL_MAX" ]; then
+              ADMIN_ENV=",DB_ADMIN_POOL_MAX=${DB_ADMIN_POOL_MAX}"
+            fi
           fi
           # 公開モード(手順: docs/operations/deployment-setup.md Step 7-4):
           #   lb-iap(既定): LB+IAP 経由のみ許可し、*.run.app への直接アクセスを ingress で遮断
@@ -269,7 +294,7 @@ jobs:
             echo "::error::direct-iap で AUTH_MODE=iap ですが DASHBOARD_IAP_AUDIENCE が未設定です。DASHBOARD_AUTH_MODE を header に変更するか、secret を削除してください(docs/operations/deployment-setup.md Step 7-4 A)"
             exit 1
           fi
-          ENV_VARS="GCP_PROJECT_ID=${GCP_PROJECT_ID},GCP_REGION=${GCP_REGION},AUTH_MODE=${AUTH_MODE},DB_POOL_MAX=5"
+          ENV_VARS="GCP_PROJECT_ID=${GCP_PROJECT_ID},GCP_REGION=${GCP_REGION},AUTH_MODE=${AUTH_MODE},DB_POOL_MAX=5${ADMIN_ENV}"
           if [ -n "$DASHBOARD_IAP_AUDIENCE" ]; then
             ENV_VARS="${ENV_VARS},IAP_AUDIENCE=${DASHBOARD_IAP_AUDIENCE}"
           fi
@@ -284,7 +309,7 @@ jobs:
             "$AUTH_FLAG" \
             --ingress "$INGRESS" \
             --set-env-vars "$ENV_VARS" \
-            --set-secrets "DB_HOST=ai-manager-db-host:latest,DB_NAME=ai-manager-db-name:latest,DB_USER=ai-manager-db-dashboard-user:latest,DB_PASSWORD=ai-manager-db-dashboard-password:latest" \
+            --set-secrets "$SET_SECRETS" \
             --min-instances 0 \
             --max-instances 2 \
             --concurrency 20 \
@@ -325,6 +350,7 @@ jobs:
           upsert_job ai-manager-daily-report    "0 18 * * 1-5" /jobs/daily-report
           upsert_job ai-manager-weekly-summary  "0 17 * * 5"  /jobs/weekly-summary
           upsert_job ai-manager-knowledge-sync  "30 6 * * *"  /jobs/knowledge-sync
+          upsert_job ai-manager-anomaly-scan    "30 9 * * 1-5" /jobs/anomaly-scan
 
       - name: デプロイ結果の表示
         env:

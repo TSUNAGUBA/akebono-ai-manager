@@ -72,6 +72,7 @@ Invoke-Gcloud @(
   'cloudscheduler.googleapis.com',
   'chat.googleapis.com',
   'drive.googleapis.com',
+  'calendar-json.googleapis.com',
   'vpcaccess.googleapis.com',
   '--project', $ProjectId
 )
@@ -148,6 +149,16 @@ foreach ($role in $runtimeRoles) {
   ) | Out-Null
 }
 
+# ランタイム SA 自身への signJwt 許可(カレンダー等のドメイン全体委任トークン取得に使用。
+# SA キーを発行せずに委任 JWT を署名するための最小権限。SA 単位のバインディングで冪等)
+Invoke-Gcloud @(
+  'iam', 'service-accounts', 'add-iam-policy-binding', $runtimeSa,
+  '--member', "serviceAccount:$runtimeSa",
+  '--role', 'roles/iam.serviceAccountTokenCreator',
+  '--project', $ProjectId,
+  '--quiet'
+) | Out-Null
+
 Write-Host "== 5/5 Workload Identity Federation ==" -ForegroundColor Cyan
 if (-not (Test-GcloudResource @('iam', 'workload-identity-pools', 'describe', $PoolId, '--location', 'global', '--project', $ProjectId))) {
   Invoke-Gcloud @(
@@ -209,6 +220,16 @@ $config = [ordered]@{
   MODEL_PRO                      = ''
   MODEL_PRICING_JSON             = ''
   EMBEDDING_MODEL                = ''
+  CALENDAR_ENABLED               = ''
+  DASHBOARD_ADMIN_DB_ENABLED     = ''
+  DB_ADMIN_POOL_MAX              = ''
+  DELEGATION_SA_EMAIL            = ''
+  KNOWLEDGE_SCOPE_HOPS           = ''
+  KNOWLEDGE_SCOPE_FALLBACK       = ''
+  ANOMALY_STALL_DAYS             = ''
+  ANOMALY_OVERLOAD_TASKS         = ''
+  ANOMALY_QUALITY_MIN_SAMPLES    = ''
+  ANOMALY_COOLDOWN_DAYS          = ''
 }
 
 # 再実行時、オペレーターが記入済みの任意項目を巻き戻さない(既存ファイルの値を優先してマージ)。
@@ -217,7 +238,10 @@ $operatorEditableKeys = @(
   'GCP_VPC_CONNECTOR', 'ADMIN_SPACE_ID', 'KNOWLEDGE_DRIVE_FOLDER_ID',
   'DASHBOARD_AUTH_MODE', 'DASHBOARD_IAP_AUDIENCE', 'DASHBOARD_EXPOSURE',
   'VERTEX_LOCATION', 'VERTEX_EMBEDDING_LOCATION',
-  'MODEL_FLASH_LITE', 'MODEL_FLASH', 'MODEL_PRO', 'MODEL_PRICING_JSON', 'EMBEDDING_MODEL'
+  'MODEL_FLASH_LITE', 'MODEL_FLASH', 'MODEL_PRO', 'MODEL_PRICING_JSON', 'EMBEDDING_MODEL',
+  'CALENDAR_ENABLED', 'DASHBOARD_ADMIN_DB_ENABLED', 'DB_ADMIN_POOL_MAX', 'DELEGATION_SA_EMAIL',
+  'KNOWLEDGE_SCOPE_HOPS', 'KNOWLEDGE_SCOPE_FALLBACK',
+  'ANOMALY_STALL_DAYS', 'ANOMALY_OVERLOAD_TASKS', 'ANOMALY_QUALITY_MIN_SAMPLES', 'ANOMALY_COOLDOWN_DAYS'
 )
 if (Test-Path $OutputConfigPath) {
   try {

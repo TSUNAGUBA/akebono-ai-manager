@@ -70,6 +70,27 @@ export async function withClient<T>(
   }
 }
 
+/**
+ * 1接続を借りてトランザクション内で処理を実行する。
+ * fn が例外を投げた場合は ROLLBACK して元の例外を再送出する。
+ */
+export async function withTransaction<T>(
+  pool: pg.Pool,
+  fn: (client: pg.PoolClient) => Promise<T>,
+): Promise<T> {
+  return withClient(pool, async (client) => {
+    try {
+      await client.query('BEGIN');
+      const result = await fn(client);
+      await client.query('COMMIT');
+      return result;
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw err;
+    }
+  });
+}
+
 /** pgvector に渡すベクトルリテラル表現('[0.1,0.2,...]')を作る。 */
 export function toVectorLiteral(embedding: readonly number[]): string {
   return `[${embedding.join(',')}]`;

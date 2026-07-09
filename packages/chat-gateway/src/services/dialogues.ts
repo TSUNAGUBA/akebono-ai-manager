@@ -1,5 +1,6 @@
 import { AppError, ERROR_CODES, query } from '@ai-manager/shared';
 import type pg from 'pg';
+import { formatOpenTasks, listOpenTasks } from './tasks.js';
 
 /** ops.dialogues.turns の1要素 */
 export interface DialogueTurn {
@@ -71,7 +72,7 @@ export async function findMorningDialogue(
 
 export interface CreateDialogueInput {
   userId: string;
-  dialogueType: 'morning_checkin' | 'completion_review' | 'adhoc_qa' | 'escalation';
+  dialogueType: 'morning_checkin' | 'completion_review' | 'adhoc_qa' | 'task_instruction' | 'escalation';
   turns: DialogueTurn[];
   taskId?: string | null;
   projectId?: string | null;
@@ -166,24 +167,11 @@ export function nowTurn(role: 'ai' | 'user', content: string): DialogueTurn {
   return { role, content, ts: new Date().toISOString() };
 }
 
-/** ユーザーの着手中タスクを対話コンテキスト用に取得する。 */
+/**
+ * ユーザーの着手中タスクを対話コンテキスト用に取得する。
+ * [ID:番号] 付きの整形は tasks.ts の共通ヘルパーを再利用する
+ * (朝の対話での着手検知 started_task_id が ID を参照する)。
+ */
 export async function openTasksSummary(pool: pg.Pool, userId: string): Promise<string> {
-  const result = await query<{ title: string; status: string; due_date: string | null; project_name: string | null }>(
-    pool,
-    `SELECT t.title, t.status, t.due_date::text AS due_date, p.name AS project_name
-     FROM ops.tasks t
-     LEFT JOIN ops.projects p ON p.project_id = t.project_id
-     WHERE t.assignee_id = $1 AND t.status IN ('approved', 'in_progress', 'blocked')
-     ORDER BY t.due_date NULLS LAST, t.task_id
-     LIMIT 5`,
-    [userId],
-  );
-  if (result.rows.length === 0) return '(登録済みの着手中タスクはありません)';
-  return result.rows
-    .map((t) => {
-      const project = t.project_name === null ? '' : `[${t.project_name}] `;
-      const due = t.due_date === null ? '' : `(期限: ${t.due_date})`;
-      return `- ${project}${t.title} / 状態: ${t.status} ${due}`;
-    })
-    .join('\n');
+  return formatOpenTasks(await listOpenTasks(pool, userId));
 }

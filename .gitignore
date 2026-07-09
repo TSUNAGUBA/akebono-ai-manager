@@ -13,3 +13,4 @@ deploy-config.json
 # misc
 *.log
 .DS_Store
+.claude/worktrees/

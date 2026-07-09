@@ -11,6 +11,8 @@ export interface NavItem {
   path: string;
   label: string;
   adminOnly?: boolean;
+  /** このプレフィックスに一致するパスでもアクティブ表示する(サブページを持つ項目用) */
+  matchPrefix?: string;
 }
 
 export const NAV_ITEMS: NavItem[] = [
@@ -20,6 +22,7 @@ export const NAV_ITEMS: NavItem[] = [
   { path: '/me', label: 'わたしの振り返り' },
   { path: '/growth', label: '成長観察', adminOnly: true },
   { path: '/cost', label: 'AIコスト', adminOnly: true },
+  { path: '/admin/industries', label: 'マスタ管理', adminOnly: true, matchPrefix: '/admin/' },
 ];
 
 /** 全ページ共通のシェル。ナビゲーションはロールに応じて出し分ける。 */
@@ -32,8 +35,10 @@ export function pageLayout(options: {
 }): string {
   const nav = NAV_ITEMS.filter((item) => item.adminOnly !== true || options.viewer.role === 'admin')
     .map((item) => {
-      const active = item.path === options.activePath ? ' class="active"' : '';
-      return `<a href="${h(item.path)}"${active}>${h(item.label)}</a>`;
+      const isActive =
+        item.path === options.activePath ||
+        (item.matchPrefix !== undefined && options.activePath.startsWith(item.matchPrefix));
+      return `<a href="${h(item.path)}"${isActive ? ' class="active"' : ''}>${h(item.label)}</a>`;
     })
     .join('');
 

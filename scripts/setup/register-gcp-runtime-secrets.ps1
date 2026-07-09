@@ -10,7 +10,10 @@
     ai-manager-db-app-user/password       … アプリ用(ai_manager_app_rw)
     ai-manager-db-dashboard-user/password … ダッシュボード用(ai_manager_dashboard_ro)
     ai-manager-db-admin-user/password     … マイグレーション用(管理ユーザー)
+    ai-manager-db-master-admin-user/password … マスタ管理 UI 用(ai_manager_admin_rw、v0.3)
   DB ロールの作成は scripts/setup/create-db-roles.sql を参照。
+  再実行時、変更しないパスワードは空 Enter でスキップできる(既存の値を維持)。
+  新規(シークレット未作成)のパスワードは従来どおり必須。
 
 .EXAMPLE
   ./register-gcp-runtime-secrets.ps1 -ProjectId my-project
@@ -22,7 +25,8 @@ param(
   [string]$DbName = 'ai_manager',
   [string]$AppUser = 'ai_manager_app_rw',
   [string]$DashboardUser = 'ai_manager_dashboard_ro',
-  [string]$AdminUser
+  [string]$AdminUser,
+  [string]$MasterAdminUser = 'ai_manager_admin_rw'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -35,11 +39,32 @@ function Read-RequiredValue {
   return $value
 }
 
+function Test-GcpSecretExists {
+  param([string]$Name)
+  # PS 5.1 では native コマンドの stderr リダイレクトが EAP='Stop' で致命的エラーになるため一時緩和
+  # (未作成シークレットの describe は stderr に NOT_FOUND を出すのが正常系)
+  $previousEap = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    & gcloud secrets describe $Name --project $ProjectId *> $null
+  } finally {
+    $ErrorActionPreference = $previousEap
+  }
+  return ($LASTEXITCODE -eq 0)
+}
+
 function Read-SecretValue {
-  param([string]$Prompt)
-  $secure = Read-Host -Prompt $Prompt -AsSecureString
+  param([string]$Prompt, [string]$SecretName)
+  # 再実行の安全化: 既存シークレットがある場合のみ「空 Enter でスキップ(既存の値を維持)」を許可する。
+  # 新規(未作成)の場合に空を許すと、デプロイ時に空パスワードで接続不能になるため必須のまま
+  $exists = Test-GcpSecretExists -Name $SecretName
+  $hint = if ($exists) { '(変更しない場合は空 Enter でスキップ)' } else { '' }
+  $secure = Read-Host -Prompt "$Prompt$hint" -AsSecureString
   $plain = [System.Net.NetworkCredential]::new('', $secure).Password
-  if ([string]::IsNullOrWhiteSpace($plain)) { throw "$Prompt は必須です" }
+  if ([string]::IsNullOrWhiteSpace($plain)) {
+    if ($exists) { return $null }
+    throw "$Prompt は必須です(シークレット $SecretName が未作成のためスキップできません)"
+  }
   return $plain
 }
 
@@ -72,22 +97,35 @@ function Set-GcpSecret {
   Write-Host "  登録済み: $Name"
 }
 
+# パスワードは $null(空 Enter でスキップ)の場合に既存の値を維持する(再実行の安全化)
+function Set-GcpSecretOrKeep {
+  param([string]$Name, [string]$Value)
+  if ([string]::IsNullOrEmpty($Value)) {
+    Write-Host "  スキップ(既存の値を維持): $Name" -ForegroundColor DarkGray
+    return
+  }
+  Set-GcpSecret -Name $Name -Value $Value
+}
+
 $DbHost = Read-RequiredValue -Current $DbHost -Prompt 'RDS エンドポイント(例: xxx.ap-northeast-1.rds.amazonaws.com)'
 $AdminUser = Read-RequiredValue -Current $AdminUser -Prompt 'マイグレーション用の管理 DB ユーザー名'
 
-$appPassword = Read-SecretValue -Prompt "アプリ用ユーザー($AppUser)のパスワード"
-$dashboardPassword = Read-SecretValue -Prompt "ダッシュボード用ユーザー($DashboardUser)のパスワード"
-$adminPassword = Read-SecretValue -Prompt "管理ユーザー($AdminUser)のパスワード"
+$appPassword = Read-SecretValue -Prompt "アプリ用ユーザー($AppUser)のパスワード" -SecretName 'ai-manager-db-app-password'
+$dashboardPassword = Read-SecretValue -Prompt "ダッシュボード用ユーザー($DashboardUser)のパスワード" -SecretName 'ai-manager-db-dashboard-password'
+$adminPassword = Read-SecretValue -Prompt "管理ユーザー($AdminUser)のパスワード" -SecretName 'ai-manager-db-admin-password'
+$masterAdminPassword = Read-SecretValue -Prompt "マスタ管理用ユーザー($MasterAdminUser)のパスワード" -SecretName 'ai-manager-db-master-admin-password'
 
 Write-Host "== Secret Manager へ登録 ==" -ForegroundColor Cyan
 Set-GcpSecret -Name 'ai-manager-db-host' -Value $DbHost
 Set-GcpSecret -Name 'ai-manager-db-name' -Value $DbName
 Set-GcpSecret -Name 'ai-manager-db-app-user' -Value $AppUser
-Set-GcpSecret -Name 'ai-manager-db-app-password' -Value $appPassword
+Set-GcpSecretOrKeep -Name 'ai-manager-db-app-password' -Value $appPassword
 Set-GcpSecret -Name 'ai-manager-db-dashboard-user' -Value $DashboardUser
-Set-GcpSecret -Name 'ai-manager-db-dashboard-password' -Value $dashboardPassword
+Set-GcpSecretOrKeep -Name 'ai-manager-db-dashboard-password' -Value $dashboardPassword
 Set-GcpSecret -Name 'ai-manager-db-admin-user' -Value $AdminUser
-Set-GcpSecret -Name 'ai-manager-db-admin-password' -Value $adminPassword
+Set-GcpSecretOrKeep -Name 'ai-manager-db-admin-password' -Value $adminPassword
+Set-GcpSecret -Name 'ai-manager-db-master-admin-user' -Value $MasterAdminUser
+Set-GcpSecretOrKeep -Name 'ai-manager-db-master-admin-password' -Value $masterAdminPassword
 
 Write-Host ""
 Write-Host "完了しました。デプロイ時に Cloud Run へ自動的にマウントされます。" -ForegroundColor Green
