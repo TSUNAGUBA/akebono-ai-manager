@@ -64,7 +64,7 @@ flowchart LR
 |---|---|---|
 | PowerShell 7+ (`pwsh`) | セットアップスクリプトの実行 | Windows PowerShell 5.1 でも可 |
 | gcloud CLI | GCP リソースの作成 | オーナー相当の権限で `gcloud auth login` 済み |
-| gh CLI | repository secrets の登録 | `gh auth login` 済み |
+| gh CLI | repository secrets の登録 | `gh auth login` 済み。**2.5.0 以上**(登録スクリプトが stdin 渡しの改行自動除去に依存) |
 | psql | DB ロール作成・ユーザー登録 | RDS へ接続できるネットワークから実行 |
 
 ## セットアップ手順
