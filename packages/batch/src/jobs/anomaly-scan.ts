@@ -1,4 +1,11 @@
-import { logger, optionalEnv, optionalIntEnv, query, sendChatMessage } from '@ai-manager/shared';
+import {
+  escalationCard,
+  logger,
+  optionalEnv,
+  optionalIntEnv,
+  query,
+  sendChatMessage,
+} from '@ai-manager/shared';
 import type pg from 'pg';
 import type { JobSummary } from './morning-checkin.js';
 
@@ -127,6 +134,8 @@ async function raiseAnomaly(
     cooldownDays: number;
   },
 ): Promise<void> {
+  // ── 起票(SoT: ops.escalations)───────────────────────────────
+  let escalationId: string | undefined;
   try {
     const existing = await query(
       pool,
@@ -143,24 +152,42 @@ async function raiseAnomaly(
       return;
     }
 
-    await query(
+    const inserted = await query<{ escalation_id: string }>(
       pool,
       `INSERT INTO ops.escalations (reason, context, related_task_id, related_user_id)
-       VALUES ('member_anomaly', $1, $2, $3)`,
+       VALUES ('member_anomaly', $1, $2, $3)
+       RETURNING escalation_id`,
       [input.context, input.relatedTaskId, input.relatedUserId],
     );
+    escalationId = inserted.rows[0]?.escalation_id;
     summary.sent += 1;
-    logger.info('異常シグナルを起票しました', { context: input.context });
-
-    const adminSpace = optionalEnv('ADMIN_SPACE_ID', '');
-    if (adminSpace !== '') {
-      await sendChatMessage(adminSpace, { text: `⚠️ 異常シグナル検知\n${input.context}` });
-    }
+    logger.info('異常シグナルを起票しました', { context: input.context, escalationId });
   } catch (err) {
     // 1 件の失敗で走査全体を止めない(非ブロッキング)
     summary.failed += 1;
     logger.error('異常シグナルの起票に失敗しました(次のシグナルへ継続)', err, {
       context: input.context,
+    });
+    return;
+  }
+
+  // ── 管理者通知(補助処理)─────────────────────────────────────
+  // 「裁定を記録」ボタン付きカード(chat-gateway の raiseEscalation と同じビルダー)で通知し、
+  // member_anomaly も裁定→decision_rules 還流の入口に乗せる。
+  // 通知失敗は起票済みの事実を巻き戻さない(sent は維持、failed に二重計上しない)
+  try {
+    const adminSpace = optionalEnv('ADMIN_SPACE_ID', '');
+    if (adminSpace !== '' && escalationId !== undefined) {
+      await sendChatMessage(adminSpace, {
+        text: `⚠️ 異常シグナル検知\n${input.context}`,
+        cardsV2: [escalationCard(escalationId, 'member_anomaly', input.context)],
+      });
+    }
+  } catch (err) {
+    logger.warn('異常シグナルの管理者通知に失敗しました(起票は完了済み)', {
+      context: input.context,
+      escalationId,
+      error: String(err),
     });
   }
 }

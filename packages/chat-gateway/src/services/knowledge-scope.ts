@@ -51,6 +51,8 @@ export async function resolveKnowledgeScope(
  * 質問の文脈から対象顧客を特定する(要件 v0.3 §4.3)。
  * 優先順: ①対話文脈のプロジェクト顧客(呼び出し元が渡す) ②質問文中の顧客名/ID のマスタ照合。
  * 複数一致時は最長一致(より具体的な名前)を採用する。
+ * 照合の堅牢化: 顧客名/ID の LIKE メタ文字(% _ \)をエスケープしてパターン誤解釈を防ぎ、
+ * 1文字の名前(「A」等)による過剰一致を避けるため length(name) >= 2 の顧客のみ照合する。
  */
 export async function identifyTargetCustomer(
   pool: pg.Pool,
@@ -62,8 +64,15 @@ export async function identifyTargetCustomer(
   }
   const result = await query<{ customer_id: string; name: string }>(
     pool,
-    `SELECT customer_id, name FROM ops.customers
-      WHERE ($1 ILIKE '%' || name || '%' OR $1 ILIKE '%' || customer_id || '%')
+    `WITH candidates AS (
+       SELECT customer_id, name,
+              replace(replace(replace(name, '\\', '\\\\'), '%', '\\%'), '_', '\\_') AS name_pattern,
+              replace(replace(replace(customer_id, '\\', '\\\\'), '%', '\\%'), '_', '\\_') AS id_pattern
+         FROM ops.customers
+        WHERE length(name) >= 2
+     )
+     SELECT customer_id, name FROM candidates
+      WHERE ($1 ILIKE '%' || name_pattern || '%' OR $1 ILIKE '%' || id_pattern || '%')
       ORDER BY length(name) DESC
       LIMIT 1`,
     [text],

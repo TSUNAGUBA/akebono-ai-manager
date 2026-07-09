@@ -8,6 +8,7 @@ import {
   generateJson,
   jstDateString,
   logger,
+  query,
   MORNING_DIALOGUE_INSTRUCTION,
   MORNING_RESPONSE_SCHEMA,
   SYSTEM_PROMPT,
@@ -255,6 +256,30 @@ interface QaLlmResponse {
   confidence: 'high' | 'medium' | 'low';
 }
 
+/**
+ * 対話文脈のプロジェクト顧客(要件 v0.3 §4.3 の優先順①)を導出する:
+ * 本人の直近の in_progress タスクが属するプロジェクトの顧客。
+ * 文脈顧客は補助情報のため、取得失敗は無視して従来動作(質問文からの特定のみ)に倒す。
+ */
+async function findContextCustomerId(pool: pg.Pool, userId: string): Promise<string | undefined> {
+  try {
+    const result = await query<{ customer_id: string | null }>(
+      pool,
+      `SELECT p.customer_id
+         FROM ops.tasks t
+         JOIN ops.projects p ON p.project_id = t.project_id
+        WHERE t.assignee_id = $1 AND t.status = 'in_progress'
+        ORDER BY t.updated_at DESC
+        LIMIT 1`,
+      [userId],
+    );
+    return result.rows[0]?.customer_id ?? undefined;
+  } catch (err) {
+    logger.error('文脈顧客の取得に失敗しました(質問文からの特定のみで継続)', err, { userId });
+    return undefined;
+  }
+}
+
 /** 随時 QA: RAG で文脈を供給して回答する。確信が持てなければエスカレーション。 */
 async function answerAdhocQuestion(
   pool: pg.Pool,
@@ -266,7 +291,9 @@ async function answerAdhocQuestion(
 
   // ナレッジスコープ(要件 v0.3 §4): 対象顧客を特定できたら 1 ホップの到達可能集合で絞り、
   // 特定できなければ既定で顧客固有を除外する(誤混入防止)。例え話は共通ナレッジのため対象外
-  const targetCustomerId = await identifyTargetCustomer(pool, text);
+  // 優先順①: 対話文脈のプロジェクト顧客(本人の直近 in_progress タスク) ②: 質問文の名称照合
+  const contextCustomerId = await findContextCustomerId(pool, user.user_id);
+  const targetCustomerId = await identifyTargetCustomer(pool, text, contextCustomerId);
   const scope =
     targetCustomerId !== undefined
       ? await resolveKnowledgeScope(pool, targetCustomerId)
