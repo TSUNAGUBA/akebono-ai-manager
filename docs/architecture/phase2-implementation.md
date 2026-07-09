@@ -24,9 +24,9 @@
 |---|---|---|
 | `CALENDAR_ENABLED`(secret) | 無効 | 朝の問いかけへの予定反映。Workspace のドメイン全体委任が前提(deployment-setup.md Step 7-6) |
 | `DASHBOARD_ADMIN_DB_ENABLED`(secret) | 無効 | マスタ管理 UI の書込接続(Step 7-7)。無効時は案内表示 |
-| `KNOWLEDGE_SCOPE_HOPS`(env) | 1 | 関係グラフの探索ホップ数(最大 2) |
-| `KNOWLEDGE_SCOPE_FALLBACK`(env) | exclude-customer | 対象顧客が特定できない場合の動作(`all` で v0.2 互換の全域検索) |
-| `ANOMALY_STALL_DAYS` / `ANOMALY_OVERLOAD_TASKS` / `ANOMALY_QUALITY_MIN_SAMPLES` / `ANOMALY_COOLDOWN_DAYS`(env) | 3 / 7 / 3 / 7 | 異常検知の閾値 |
+| `KNOWLEDGE_SCOPE_HOPS`(secret) | 1 | 関係グラフの探索ホップ数(最大 2) |
+| `KNOWLEDGE_SCOPE_FALLBACK`(secret) | exclude-customer | 対象顧客が特定できない場合の動作(`all` で v0.2 互換の全域検索) |
+| `ANOMALY_STALL_DAYS` / `ANOMALY_OVERLOAD_TASKS` / `ANOMALY_QUALITY_MIN_SAMPLES` / `ANOMALY_COOLDOWN_DAYS`(secret) | 3 / 7 / 3 / 7 | 異常検知の閾値 |
 
 ## 3. 設計判断の記録(ADR)
 
@@ -73,7 +73,8 @@
 
 ## 5. 既知の制約(Phase 3 への引き継ぎ)
 
-- dwh の業界分析軸(dim_customer.industry)は主業界のみ(多対多の分析軸化は Phase 3 で検討)
+- dwh の業界分析軸(dim_project.industry)は主業界のみ(多対多の分析軸化は Phase 3 で検討)
 - レガシー列 ops.customers.industry は値空間を統一した上で残置(v0.3 §6 の二段階移行。ETL の customer_industries 切替後に削除)
+- 顧客マスタの無効化(v0.3 §5)は未対応 — ops.customers に active 列がないため。必要時にスキーマ追加を判断
 - タスクの一覧・編集 UI はダッシュボード未実装(Chat の動線が SoT。閲覧は既存の負荷マップ/プロジェクトページ)
 - 例え話ライブラリの拡充・裁定の Drive 原本反映は運用タスク

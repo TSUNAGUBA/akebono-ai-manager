@@ -56,7 +56,8 @@ BEGIN
     AND (dp.project_name <> p.name
       OR dp.status <> p.status
       OR dp.customer_id IS DISTINCT FROM p.customer_id
-      OR dp.customer_name IS DISTINCT FROM c.name);
+      OR dp.customer_name IS DISTINCT FROM c.name
+      OR dp.industry IS DISTINCT FROM c.industry);
 
   -- projects: 新規・変更後の現行行を追加
   INSERT INTO dwh.dim_project (project_id, project_name, project_type, customer_id, customer_name, industry, status, valid_from)

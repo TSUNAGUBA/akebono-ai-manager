@@ -88,6 +88,31 @@ describe('recordResolution + refluxResolutionToKnowledge(SQL 整合)', () => {
     expect(update?.params).toEqual(['5', 'admin1', '出荷優先で裁定する']);
   });
 
+  it('裁定ゲートの単一化: 保存成功時に同一管理者の他の open な受付状態をクリアする', async () => {
+    const { pool, calls } = createMockPool((text) => {
+      if (text.includes('SET resolution = $3')) return { rows: [resolvedRow] };
+      return undefined;
+    });
+    await recordResolution(pool, '5', 'admin1', '出荷優先で裁定する');
+
+    const clear = findCall(calls, 'SET resolution_requested_by = NULL');
+    expect(clear).toBeDefined();
+    expect(clear?.text).toContain('escalation_id <> $1'); // 記録した本体は対象外
+    expect(clear?.text).toContain(`status = 'open'`); // 裁定済みには触れない
+    expect(clear?.params).toEqual(['5', 'admin1']);
+    // SoT への保存が先、ゲート解除が後
+    expect(callIndex(calls, 'SET resolution = $3')).toBeLessThan(
+      callIndex(calls, 'SET resolution_requested_by = NULL'),
+    );
+  });
+
+  it('裁定ゲートの単一化: 既に裁定済み(保存されなかった)場合は他ゲートをクリアしない', async () => {
+    const { pool, calls } = createMockPool(() => ({ rows: [] }));
+    const row = await recordResolution(pool, '5', 'admin1', '出荷優先で裁定する');
+    expect(row).toBeUndefined();
+    expect(findCall(calls, 'SET resolution_requested_by = NULL')).toBeUndefined();
+  });
+
   it('還流: decision_rules チャンクを doc_id=escalation/{id} で UPSERT し、reflected を立てる', async () => {
     const { pool, calls } = createMockPool(() => undefined);
     await refluxResolutionToKnowledge(pool, resolvedRow);

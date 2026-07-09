@@ -139,6 +139,9 @@ export async function findAwaitingResolution(
 
 /**
  * 裁定を SoT(ops.escalations)へ保存する。open のもののみ対象(裁定済みを上書きしない)。
+ * 保存成功時は、同一管理者の他の open な裁定受付状態もクリアする(裁定ゲートの単一化):
+ * 複数のエスカレーションで「裁定を記録」を押していた場合に、次のメッセージが
+ * 別のゲートへ誤って取り込まれるのを防ぐ。裁定・ステータス自体には触れない。
  * @returns 保存できた場合は更新後の行、既に裁定済みの場合は undefined
  */
 export async function recordResolution(
@@ -155,7 +158,17 @@ export async function recordResolution(
      RETURNING ${ESCALATION_COLUMNS}`,
     [escalationId, adminUserId, resolutionText],
   );
-  return result.rows[0];
+  const resolved = result.rows[0];
+  if (resolved !== undefined) {
+    await query(
+      pool,
+      `UPDATE ops.escalations
+       SET resolution_requested_by = NULL, resolution_requested_at = NULL
+       WHERE resolution_requested_by = $2 AND status = 'open' AND escalation_id <> $1`,
+      [escalationId, adminUserId],
+    );
+  }
+  return resolved;
 }
 
 function hashText(text: string): string {

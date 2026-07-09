@@ -41,6 +41,14 @@ export const SCOPES = {
 //   1) Workspace 管理者がランタイム SA のクライアント ID に対象スコープを委任
 //   2) ランタイム SA 自身への roles/iam.serviceAccountTokenCreator 付与
 
+/**
+ * ドメイン全体委任で要求を許可するスコープのホワイトリスト。
+ * Workspace 管理者が委任したスコープ(deployment-setup.md Step 7-6)と常に一致させる。
+ * 新しい委任スコープを使う機能を追加する場合は、Workspace 側の委任設定と同時に
+ * このリストを更新すること(リスト外のスコープは AUTH_TOKEN_INVALID で拒否される)。
+ */
+const DELEGATED_SCOPE_ALLOWLIST: ReadonlySet<string> = new Set([SCOPES.CALENDAR_READONLY]);
+
 interface CachedToken {
   token: string;
   expiresAt: number;
@@ -71,6 +79,16 @@ export async function getDelegatedAccessToken(
   subjectEmail: string,
   scopes: string[],
 ): Promise<string> {
+  // 委任スコープの限定: 委任トークンは本人として振る舞えるため、
+  // 実装済み機能が必要とする最小スコープ以外の要求はコード側でも拒否する(多層防御)
+  const disallowed = scopes.filter((scope) => !DELEGATED_SCOPE_ALLOWLIST.has(scope));
+  if (disallowed.length > 0) {
+    throw new AppError(
+      ERROR_CODES.AUTH_TOKEN_INVALID,
+      `許可されていない委任スコープです: ${disallowed.join(', ')}(許可リストは google-auth.ts の DELEGATED_SCOPE_ALLOWLIST)`,
+      { details: { disallowedScopes: disallowed } },
+    );
+  }
   const cacheKey = `${subjectEmail}|${[...scopes].sort().join(' ')}`;
   const cached = delegatedTokenCache.get(cacheKey);
   if (cached !== undefined && cached.expiresAt > Date.now() + 60_000) {
