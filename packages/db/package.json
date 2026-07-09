@@ -1,0 +1,17 @@
+{
+  "name": "@ai-manager/db",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/migrate.js",
+  "scripts": {
+    "migrate": "node dist/migrate.js"
+  },
+  "dependencies": {
+    "@ai-manager/shared": "0.1.0",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.11.10"
+  }
+}

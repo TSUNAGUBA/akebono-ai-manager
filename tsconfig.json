@@ -1,0 +1,10 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/shared" },
+    { "path": "packages/db" },
+    { "path": "packages/chat-gateway" },
+    { "path": "packages/batch" },
+    { "path": "packages/dashboard" }
+  ]
+}

@@ -1,0 +1,272 @@
+# デプロイ(GCP Cloud Run)
+# 設定値はすべて repository secrets から読み取る。
+# secrets の登録は scripts/setup/register-github-secrets.ps1 で行う。
+# 手順の全体像: docs/operations/deployment-setup.md
+
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # Workload Identity Federation(キーレス認証)に必要
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  IMAGE_NAME: ai-manager
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: verify
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 必須 secrets の検証
+        env:
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          GCP_PROJECT_NUMBER: ${{ secrets.GCP_PROJECT_NUMBER }}
+          GCP_REGION: ${{ secrets.GCP_REGION }}
+          GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          GCP_DEPLOY_SERVICE_ACCOUNT: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          GCP_RUNTIME_SERVICE_ACCOUNT: ${{ secrets.GCP_RUNTIME_SERVICE_ACCOUNT }}
+          GCP_ARTIFACT_REPOSITORY: ${{ secrets.GCP_ARTIFACT_REPOSITORY }}
+        run: |
+          missing=""
+          for name in GCP_PROJECT_ID GCP_PROJECT_NUMBER GCP_REGION GCP_WORKLOAD_IDENTITY_PROVIDER GCP_DEPLOY_SERVICE_ACCOUNT GCP_RUNTIME_SERVICE_ACCOUNT GCP_ARTIFACT_REPOSITORY; do
+            if [ -z "${!name}" ]; then missing="$missing $name"; fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::repository secrets が未設定です:$missing"
+            echo "scripts/setup/register-github-secrets.ps1 で登録してください(docs/operations/deployment-setup.md 参照)"
+            exit 1
+          fi
+
+      - name: GCP 認証(Workload Identity Federation)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Docker 認証(Artifact Registry)
+        env:
+          GCP_REGION: ${{ secrets.GCP_REGION }}
+        run: gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
+
+      - name: イメージのビルドとプッシュ
+        env:
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          GCP_REGION: ${{ secrets.GCP_REGION }}
+          GCP_ARTIFACT_REPOSITORY: ${{ secrets.GCP_ARTIFACT_REPOSITORY }}
+        run: |
+          IMAGE="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${GCP_ARTIFACT_REPOSITORY}/${IMAGE_NAME}"
+          docker build -t "${IMAGE}:${GITHUB_SHA}" -t "${IMAGE}:latest" .
+          docker push "${IMAGE}:${GITHUB_SHA}"
+          docker push "${IMAGE}:latest"
+          echo "IMAGE=${IMAGE}:${GITHUB_SHA}" >> "$GITHUB_ENV"
+
+      - name: DB マイグレーション(Cloud Run Job)
+        env:
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          GCP_REGION: ${{ secrets.GCP_REGION }}
+          GCP_RUNTIME_SERVICE_ACCOUNT: ${{ secrets.GCP_RUNTIME_SERVICE_ACCOUNT }}
+          GCP_VPC_CONNECTOR: ${{ secrets.GCP_VPC_CONNECTOR }}
+        run: |
+          VPC_FLAGS=()
+          if [ -n "$GCP_VPC_CONNECTOR" ]; then
+            VPC_FLAGS=(--vpc-connector "$GCP_VPC_CONNECTOR" --vpc-egress all-traffic)
+          fi
+          gcloud run jobs deploy ai-manager-db-migrate \
+            --project "$GCP_PROJECT_ID" \
+            --region "$GCP_REGION" \
+            --image "$IMAGE" \
+            --command node \
+            --args packages/db/dist/migrate.js \
+            --service-account "$GCP_RUNTIME_SERVICE_ACCOUNT" \
+            --set-secrets "DB_HOST=ai-manager-db-host:latest,DB_NAME=ai-manager-db-name:latest,DB_USER=ai-manager-db-admin-user:latest,DB_PASSWORD=ai-manager-db-admin-password:latest" \
+            --memory 512Mi \
+            --task-timeout 600 \
+            --max-retries 0 \
+            "${VPC_FLAGS[@]}"
+          gcloud run jobs execute ai-manager-db-migrate \
+            --project "$GCP_PROJECT_ID" \
+            --region "$GCP_REGION" \
+            --wait
+
+      - name: chat-gateway のデプロイ
+        env:
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          GCP_PROJECT_NUMBER: ${{ secrets.GCP_PROJECT_NUMBER }}
+          GCP_REGION: ${{ secrets.GCP_REGION }}
+          GCP_RUNTIME_SERVICE_ACCOUNT: ${{ secrets.GCP_RUNTIME_SERVICE_ACCOUNT }}
+          GCP_VPC_CONNECTOR: ${{ secrets.GCP_VPC_CONNECTOR }}
+          ADMIN_SPACE_ID: ${{ secrets.ADMIN_SPACE_ID }}
+        run: |
+          VPC_FLAGS=()
+          if [ -n "$GCP_VPC_CONNECTOR" ]; then
+            VPC_FLAGS=(--vpc-connector "$GCP_VPC_CONNECTOR" --vpc-egress all-traffic)
+          fi
+          ENV_VARS="GCP_PROJECT_ID=${GCP_PROJECT_ID},GCP_REGION=${GCP_REGION},GCP_PROJECT_NUMBER=${GCP_PROJECT_NUMBER}"
+          if [ -n "$ADMIN_SPACE_ID" ]; then
+            ENV_VARS="${ENV_VARS},ADMIN_SPACE_ID=${ADMIN_SPACE_ID}"
+          fi
+          # Chat からのリクエストはアプリ層で JWT 検証するため公開エンドポイントとする
+          gcloud run deploy ai-manager-chat-gateway \
+            --project "$GCP_PROJECT_ID" \
+            --region "$GCP_REGION" \
+            --image "$IMAGE" \
+            --command node \
+            --args packages/chat-gateway/dist/index.js \
+            --service-account "$GCP_RUNTIME_SERVICE_ACCOUNT" \
+            --allow-unauthenticated \
+            --set-env-vars "$ENV_VARS" \
+            --set-secrets "DB_HOST=ai-manager-db-host:latest,DB_NAME=ai-manager-db-name:latest,DB_USER=ai-manager-db-app-user:latest,DB_PASSWORD=ai-manager-db-app-password:latest" \
+            --min-instances 0 \
+            --max-instances 3 \
+            --concurrency 10 \
+            --memory 512Mi \
+            --timeout 120 \
+            "${VPC_FLAGS[@]}"
+
+      - name: batch のデプロイ
+        env:
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          GCP_PROJECT_NUMBER: ${{ secrets.GCP_PROJECT_NUMBER }}
+          GCP_REGION: ${{ secrets.GCP_REGION }}
+          GCP_RUNTIME_SERVICE_ACCOUNT: ${{ secrets.GCP_RUNTIME_SERVICE_ACCOUNT }}
+          GCP_VPC_CONNECTOR: ${{ secrets.GCP_VPC_CONNECTOR }}
+          KNOWLEDGE_DRIVE_FOLDER_ID: ${{ secrets.KNOWLEDGE_DRIVE_FOLDER_ID }}
+        run: |
+          VPC_FLAGS=()
+          if [ -n "$GCP_VPC_CONNECTOR" ]; then
+            VPC_FLAGS=(--vpc-connector "$GCP_VPC_CONNECTOR" --vpc-egress all-traffic)
+          fi
+          ENV_VARS="GCP_PROJECT_ID=${GCP_PROJECT_ID},GCP_REGION=${GCP_REGION},BATCH_INVOKER_SA=${GCP_RUNTIME_SERVICE_ACCOUNT}"
+          if [ -n "$KNOWLEDGE_DRIVE_FOLDER_ID" ]; then
+            ENV_VARS="${ENV_VARS},KNOWLEDGE_DRIVE_FOLDER_ID=${KNOWLEDGE_DRIVE_FOLDER_ID}"
+          fi
+          # Scheduler(OIDC)のみ呼び出し可。IAM +アプリ層検証の多層防御
+          gcloud run deploy ai-manager-batch \
+            --project "$GCP_PROJECT_ID" \
+            --region "$GCP_REGION" \
+            --image "$IMAGE" \
+            --command node \
+            --args packages/batch/dist/index.js \
+            --service-account "$GCP_RUNTIME_SERVICE_ACCOUNT" \
+            --no-allow-unauthenticated \
+            --set-env-vars "$ENV_VARS" \
+            --set-secrets "DB_HOST=ai-manager-db-host:latest,DB_NAME=ai-manager-db-name:latest,DB_USER=ai-manager-db-app-user:latest,DB_PASSWORD=ai-manager-db-app-password:latest" \
+            --min-instances 0 \
+            --max-instances 1 \
+            --concurrency 1 \
+            --memory 512Mi \
+            --timeout 900 \
+            "${VPC_FLAGS[@]}"
+          gcloud run services add-iam-policy-binding ai-manager-batch \
+            --project "$GCP_PROJECT_ID" \
+            --region "$GCP_REGION" \
+            --member "serviceAccount:${GCP_RUNTIME_SERVICE_ACCOUNT}" \
+            --role roles/run.invoker
+
+      - name: dashboard のデプロイ
+        env:
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          GCP_REGION: ${{ secrets.GCP_REGION }}
+          GCP_RUNTIME_SERVICE_ACCOUNT: ${{ secrets.GCP_RUNTIME_SERVICE_ACCOUNT }}
+          GCP_VPC_CONNECTOR: ${{ secrets.GCP_VPC_CONNECTOR }}
+          DASHBOARD_AUTH_MODE: ${{ secrets.DASHBOARD_AUTH_MODE }}
+          DASHBOARD_IAP_AUDIENCE: ${{ secrets.DASHBOARD_IAP_AUDIENCE }}
+        run: |
+          VPC_FLAGS=()
+          if [ -n "$GCP_VPC_CONNECTOR" ]; then
+            VPC_FLAGS=(--vpc-connector "$GCP_VPC_CONNECTOR" --vpc-egress all-traffic)
+          fi
+          ENV_VARS="GCP_PROJECT_ID=${GCP_PROJECT_ID},GCP_REGION=${GCP_REGION},AUTH_MODE=${DASHBOARD_AUTH_MODE:-iap},DB_POOL_MAX=5"
+          if [ -n "$DASHBOARD_IAP_AUDIENCE" ]; then
+            ENV_VARS="${ENV_VARS},IAP_AUDIENCE=${DASHBOARD_IAP_AUDIENCE}"
+          fi
+          # 認証はアプリ層(IAP JWT 検証)+ingress 制限の多層防御:
+          # LB(IAP)経由のみ許可し、*.run.app への直接アクセスをネットワーク層で遮断する
+          gcloud run deploy ai-manager-dashboard \
+            --project "$GCP_PROJECT_ID" \
+            --region "$GCP_REGION" \
+            --image "$IMAGE" \
+            --command node \
+            --args packages/dashboard/dist/index.js \
+            --service-account "$GCP_RUNTIME_SERVICE_ACCOUNT" \
+            --allow-unauthenticated \
+            --ingress internal-and-cloud-load-balancing \
+            --set-env-vars "$ENV_VARS" \
+            --set-secrets "DB_HOST=ai-manager-db-host:latest,DB_NAME=ai-manager-db-name:latest,DB_USER=ai-manager-db-dashboard-user:latest,DB_PASSWORD=ai-manager-db-dashboard-password:latest" \
+            --min-instances 0 \
+            --max-instances 2 \
+            --concurrency 20 \
+            --memory 512Mi \
+            --timeout 60 \
+            "${VPC_FLAGS[@]}"
+
+      - name: Cloud Scheduler ジョブの登録(冪等)
+        env:
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          GCP_REGION: ${{ secrets.GCP_REGION }}
+          GCP_RUNTIME_SERVICE_ACCOUNT: ${{ secrets.GCP_RUNTIME_SERVICE_ACCOUNT }}
+        run: |
+          BATCH_URL=$(gcloud run services describe ai-manager-batch \
+            --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format 'value(status.url)')
+
+          upsert_job() {
+            local name="$1" schedule="$2" path="$3"
+            if gcloud scheduler jobs describe "$name" --project "$GCP_PROJECT_ID" --location "$GCP_REGION" >/dev/null 2>&1; then
+              gcloud scheduler jobs update http "$name" \
+                --project "$GCP_PROJECT_ID" --location "$GCP_REGION" \
+                --schedule "$schedule" --time-zone "Asia/Tokyo" \
+                --uri "${BATCH_URL}${path}" --http-method POST \
+                --oidc-service-account-email "$GCP_RUNTIME_SERVICE_ACCOUNT" \
+                --oidc-token-audience "$BATCH_URL"
+            else
+              gcloud scheduler jobs create http "$name" \
+                --project "$GCP_PROJECT_ID" --location "$GCP_REGION" \
+                --schedule "$schedule" --time-zone "Asia/Tokyo" \
+                --uri "${BATCH_URL}${path}" --http-method POST \
+                --oidc-service-account-email "$GCP_RUNTIME_SERVICE_ACCOUNT" \
+                --oidc-token-audience "$BATCH_URL" \
+                --attempt-deadline 900s
+            fi
+          }
+
+          upsert_job ai-manager-morning-checkin "0 8 * * 1-5" /jobs/morning-checkin
+          upsert_job ai-manager-daily-report    "0 18 * * 1-5" /jobs/daily-report
+          upsert_job ai-manager-weekly-summary  "0 17 * * 5"  /jobs/weekly-summary
+          upsert_job ai-manager-knowledge-sync  "30 6 * * *"  /jobs/knowledge-sync
+
+      - name: デプロイ結果の表示
+        env:
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          GCP_REGION: ${{ secrets.GCP_REGION }}
+        run: |
+          echo "## デプロイ完了" >> "$GITHUB_STEP_SUMMARY"
+          for svc in ai-manager-chat-gateway ai-manager-batch ai-manager-dashboard; do
+            url=$(gcloud run services describe "$svc" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format 'value(status.url)')
+            echo "- ${svc}: ${url}" >> "$GITHUB_STEP_SUMMARY"
+          done

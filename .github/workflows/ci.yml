@@ -1,0 +1,32 @@
+name: CI
+
+# push トリガーは付けない: PR と併用すると同一ブランチで二重実行になる。
+# main への push は deploy.yml の verify ジョブが検証する。
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: 依存関係のインストール
+        run: npm ci
+
+      - name: 型チェック+ビルド
+        run: npm run build
+
+      - name: ユニットテスト
+        run: npm test
+
+      - name: Docker イメージのビルド検証
+        run: docker build -t ai-manager:ci .
