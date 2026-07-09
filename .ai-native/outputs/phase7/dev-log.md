@@ -53,3 +53,16 @@ LB+IAP は MVP には過剰(ドメイン・月額固定費)というオペレー
 `direct-iap` = Cloud Run 直付け IAP(GA・LB 不要・追加費用なし)で `*.run.app` URL を保護。
 AUTH_MODE 既定は公開モードから導出(lb-iap→iap / direct-iap→header)。
 IAP 有効化前は --no-allow-unauthenticated により全拒否のフェイルクローズ。
+
+## Phase 2 実装(2026-07-09〜)
+
+オペレーター判断「全機能を実装し、運用を段階的に切り分けて進める」に基づき、
+v0.3(マスタ+ナレッジスコープ+管理UI)、M3、M6、カレンダー連携を一括実装。
+
+- 実装体制: ナビゲーターが v0.3 バックエンド・M6検知・カレンダー・配線を直接実装し、
+  マスタ管理 UI と M3+裁定還流を worktree 分離の並行エージェントに委任、統合はナビゲーター
+- 検証: ローカル PostgreSQL 16 で migration 0004 と undeux/しまむらシナリオ(受け入れ基準2)を実証
+- レビュー: 多角レビュー(行単位/横断トレース/規約/簡潔性/再利用/効率)の指摘を
+  検証のうえ一括修正(管理UI 10件、M3/M6 挙動系 7件)
+- 設計判断: ADR-10(Agent Engine 見送り継続)/ADR-11(裁定の SoT)/ADR-12(決定的検知)
+  → docs/architecture/phase2-implementation.md

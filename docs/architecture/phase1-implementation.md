@@ -13,10 +13,10 @@
 |---|---|---|
 | M1 ナレッジベース | 部分実装 | Drive→チャンク→embedding→rag 同期(knowledge-sync)、RAG 検索。Chat からのナレッジ投入フローは Phase 2 |
 | M2 デイリー対話エンジン | **実装済み** | 朝の問いかけ配信、仮説形成の壁打ち(構造化出力で hypothesis 抽出)、夕の振り返り(review 抽出)、随時 QA(RAG+例え話 few-shot) |
-| M3 タスクオーケストレーション | 未実装(Phase 2) | ops.tasks スキーマと状態遷移ログのみ先行整備(ops の履歴設計は初日から正しく、の方針) |
+| M3 タスクオーケストレーション | Phase 1 では未実装 → **Phase 2 で実装済み**([phase2-implementation.md](./phase2-implementation.md)) | Phase 1 時点では ops.tasks スキーマと状態遷移ログのみ先行整備 |
 | M4 自動レポーティング | **実装済み** | 日報自動生成+確認ボタン、週次管理者サマリ |
 | M5 可視化ダッシュボード | **実装済み(前倒し)** | 自前 Web アプリ(下記 ADR-2)。dwh スキーマ+pg_cron ETL も併せて実装 |
-| M6 エスカレーションルーター | 部分実装 | QA の確信度低下時の自動起票+管理者通知。回答品質の異常検知は Phase 2 |
+| M6 エスカレーションルーター | 部分実装 → **Phase 2 で完成**([phase2-implementation.md](./phase2-implementation.md)) | Phase 1: QA の確信度低下時の自動起票+管理者通知。Phase 2 で異常シグナル検知と裁定ナレッジ還流を追加 |
 
 ## 2. リポジトリ構成
 
