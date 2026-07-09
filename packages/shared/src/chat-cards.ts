@@ -325,7 +325,7 @@ export function escalationRecordingCard(
     card: {
       header: {
         title: `⚠️ エスカレーション(${escalationReasonLabel(reason)})`,
-        subtitle: '次のメッセージを裁定として記録します(15分以内に返信してください)',
+        subtitle: '次のメッセージを裁定として記録します(15分以内。「キャンセル」と送ると中止できます)',
       },
       sections: [{ widgets: [{ textParagraph: { text: context.slice(0, 500) } }] }],
     },
@@ -346,6 +346,49 @@ export function escalationResolvedCard(
         subtitle: '裁定済み ✓',
       },
       sections: [{ widgets: [{ textParagraph: { text: resolution.slice(0, 500) } }] }],
+    },
+  };
+}
+
+/**
+ * 裁定は記録済みだがナレッジ還流に失敗した状態のカード(「ナレッジ還流を再試行」ボタン付き)。
+ * ボタンは record_resolution アクションを再送し、card-action 側の再還流分岐
+ * (status='resolved' かつ knowledge_reflected=false のときのみ再還流)に到達する。冪等。
+ */
+export function escalationRefluxRetryCard(
+  escalationId: number | string,
+  reason: string,
+  resolution: string,
+): unknown {
+  return {
+    cardId: `escalation-${escalationId}`,
+    card: {
+      header: {
+        title: `エスカレーション(${escalationReasonLabel(reason)})`,
+        subtitle: '裁定は記録済みです(ナレッジへの反映に失敗しました)',
+      },
+      sections: [
+        {
+          widgets: [
+            { textParagraph: { text: resolution.slice(0, 500) } },
+            {
+              buttonList: {
+                buttons: [
+                  {
+                    text: 'ナレッジ還流を再試行',
+                    onClick: {
+                      action: {
+                        function: 'record_resolution',
+                        parameters: [{ key: 'escalationId', value: String(escalationId) }],
+                      },
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
     },
   };
 }

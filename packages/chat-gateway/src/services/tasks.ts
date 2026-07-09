@@ -123,6 +123,17 @@ export type DecompositionValidation =
   | { ok: false; reason: string };
 
 /**
+ * 'YYYY-MM-DD' 形式かつ実在する日付か。
+ * Date での round-trip 検証により '2026-06-31' 等の繰り上がる日付を弾く
+ * (そのまま INSERT すると DB の date 型でエラーになり起票がクラッシュする)。
+ */
+function isRealDateString(s: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const date = new Date(`${s}T00:00:00Z`);
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === s;
+}
+
+/**
  * LLM の分解レスポンスを検証する。
  * 担当者はメンバー一覧に実在しなければ確定できない(推測で INSERT しない)。
  * 期限・プロジェクトは不正なら未設定に落とす(グレースフルデグラデーション)。
@@ -141,7 +152,7 @@ export function validateDecomposition(
   }
 
   const deadline = (value.suggested_deadline ?? '').trim();
-  const dueDate = /^\d{4}-\d{2}-\d{2}$/.test(deadline) ? deadline : null;
+  const dueDate = isRealDateString(deadline) ? deadline : null;
 
   const projectId = (value.project_id ?? '').trim();
   const validProjectId = projects.some((p) => p.project_id === projectId) ? projectId : null;

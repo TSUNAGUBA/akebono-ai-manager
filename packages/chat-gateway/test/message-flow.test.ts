@@ -254,7 +254,7 @@ describe('裁定の受領とナレッジ還流(M6)', () => {
     expect(response.text).toContain('還流');
   });
 
-  it('還流に失敗しても裁定の記録は保持し、再還流の方法を伝える', async () => {
+  it('還流に失敗しても裁定の記録は保持し、「ナレッジ還流を再試行」ボタン付きカードを返す', async () => {
     mocks.embedTexts.mockRejectedValueOnce(new Error('embedding down'));
     const awaiting = {
       escalation_id: '5',
@@ -276,5 +276,183 @@ describe('裁定の受領とナレッジ還流(M6)', () => {
     expect(findCall(calls, 'SET resolution = $3')).toBeDefined();
     expect(findCall(calls, 'SET knowledge_reflected = TRUE')).toBeUndefined();
     expect(response.text).toContain('裁定は記録しました');
+    // 復旧経路: 再試行ボタンから card-action の再還流分岐に到達できる
+    const json = JSON.stringify(response.cardsV2);
+    expect(json).toContain('ナレッジ還流を再試行');
+    expect(json).toContain('record_resolution');
+  });
+});
+
+describe('裁定ゲートの入力ガード(M6: 無条件キャプチャ防止)', () => {
+  const awaiting = {
+    escalation_id: '5',
+    reason: 'low_confidence',
+    context: '質問: 在庫僅少時の優先順位',
+    status: 'open',
+    resolution: null,
+    knowledge_reflected: false,
+  };
+  const gateResponder: Responder = (text) => {
+    if (text.includes('resolution_requested_by = $1')) return { rows: [awaiting] };
+    return { rows: [] };
+  };
+
+  it('「キャンセル」で裁定の記録を中止し、受付状態(resolution_requested_*)をクリアする', async () => {
+    const { pool, calls } = createMockPool(gateResponder);
+    const response = await handleMessage(pool, messageEvent('キャンセル'), admin);
+
+    expect(findCall(calls, 'SET resolution_requested_by = NULL')).toBeDefined();
+    expect(findCall(calls, 'SET resolution = $3')).toBeUndefined();
+    expect(response.text).toContain('中止');
+  });
+
+  it('疑問符で終わる質問は裁定として記録せず、案内を返す(ゲートは維持)', async () => {
+    const { pool, calls } = createMockPool(gateResponder);
+    const response = await handleMessage(
+      pool,
+      messageEvent('在庫の引き当てはどうなっていますか?'),
+      admin,
+    );
+
+    expect(findCall(calls, 'SET resolution = $3')).toBeUndefined();
+    expect(findCall(calls, 'SET resolution_requested_by = NULL')).toBeUndefined();
+    expect(response.text).toContain('裁定の記録待ち');
+    expect(response.text).toContain('キャンセル');
+  });
+
+  it('タスク指示らしいメッセージは裁定として記録せず、タスク起票もしない', async () => {
+    const { pool, calls } = createMockPool(gateResponder);
+    const response = await handleMessage(
+      pool,
+      messageEvent('タスク: 田中さんに棚卸しの確認をお願い'),
+      admin,
+    );
+
+    expect(findCall(calls, 'SET resolution = $3')).toBeUndefined();
+    expect(findCall(calls, 'INSERT INTO ops.tasks')).toBeUndefined();
+    expect(mocks.generateJson).not.toHaveBeenCalled();
+    expect(response.text).toContain('裁定の記録待ち');
+  });
+
+  it('1000字を超えるメッセージは裁定として記録しない(ゲートは維持)', async () => {
+    const { pool, calls } = createMockPool(gateResponder);
+    const response = await handleMessage(pool, messageEvent('あ'.repeat(1001)), admin);
+
+    expect(findCall(calls, 'SET resolution = $3')).toBeUndefined();
+    expect(response.text).toContain('1000');
+    expect(response.text).toContain('キャンセル');
+  });
+
+  it('担当者への言及を含む正当な裁定は flash-lite 分類を経て記録できる(締め出さない)', async () => {
+    // 曖昧なタスク指示シグナル(さんに+確認して)→ flash-lite が「タスク指示でない」と判定
+    mocks.generateJson.mockResolvedValueOnce({
+      value: { is_task_instruction: false },
+      result: llmResult,
+    });
+    const { pool, calls } = createMockPool((text) => {
+      if (text.includes('resolution_requested_by = $1')) return { rows: [awaiting] };
+      if (text.includes('SET resolution = $3')) {
+        return { rows: [{ ...awaiting, status: 'resolved', resolution: '裁定' }] };
+      }
+      return { rows: [] };
+    });
+
+    const response = await handleMessage(
+      pool,
+      messageEvent('在庫僅少時は出荷を優先し、判断に迷う場合は佐藤さんに確認してください'),
+      admin,
+    );
+    expect(findCall(calls, 'SET resolution = $3')).toBeDefined();
+    expect(response.text).toContain('還流');
+  });
+
+  it('flash-lite がタスク指示と判定したメッセージは裁定として記録しない', async () => {
+    mocks.generateJson.mockResolvedValueOnce({
+      value: { is_task_instruction: true },
+      result: llmResult,
+    });
+    const { pool, calls } = createMockPool(gateResponder);
+    const response = await handleMessage(
+      pool,
+      messageEvent('佐藤さんに今週中に棚卸しの対応をやってもらってください'),
+      admin,
+    );
+    expect(findCall(calls, 'SET resolution = $3')).toBeUndefined();
+    expect(findCall(calls, 'INSERT INTO ops.tasks')).toBeUndefined();
+    expect(response.text).toContain('裁定の記録待ち');
+  });
+});
+
+describe('進行中対話の優先(M3: タスク指示検知による横取り防止)', () => {
+  const openMorning = (userId: string): Record<string, unknown> => ({
+    dialogue_id: '21',
+    created_at: new Date(),
+    user_id: userId,
+    dialogue_type: 'morning_checkin',
+    task_id: null,
+    project_id: null,
+    turns: [{ role: 'ai', content: '今日は何から始めますか?', ts: new Date().toISOString() }],
+    hypothesis: null,
+    review: null,
+  });
+
+  it('朝の対話が進行中なら、タスク指示らしいメッセージも対話の継続として扱う', async () => {
+    mocks.generateJson.mockResolvedValueOnce({
+      value: { reply: '把握しました。成功条件はどう考えますか?', hypothesis_complete: false },
+      result: llmResult,
+    });
+    const { pool, calls } = createMockPool((text) => {
+      if (text.includes('FROM ops.escalations')) return { rows: [] };
+      if (text.includes('FROM ops.suggestions')) return { rows: [] };
+      if (text.includes('UPDATE ops.dialogues')) return { rows: [], rowCount: 1 };
+      if (text.includes('FROM ops.dialogues')) return { rows: [openMorning('admin1')] };
+      return { rows: [] };
+    });
+
+    const response = await handleMessage(
+      pool,
+      messageEvent('タスク: 田中さんに今日中にA社の棚卸しをお願い'),
+      admin,
+    );
+
+    // タスク起票ではなく朝の対話の継続として処理される
+    expect(findCall(calls, 'INSERT INTO ops.tasks')).toBeUndefined();
+    expect(findCall(calls, 'UPDATE ops.dialogues')).toBeDefined();
+    expect(response.text).toContain('成功条件');
+  });
+
+  it('朝の対話で started_task_id が [ID:7] 形式でも数値部分を抽出して着手更新する', async () => {
+    mocks.generateJson.mockResolvedValueOnce({
+      value: { reply: '着手ですね。', hypothesis_complete: false, started_task_id: '[ID:7]' },
+      result: llmResult,
+    });
+    const { pool, calls } = createMockPool((text) => {
+      if (text.includes('FROM ops.suggestions')) return { rows: [] };
+      if (text.includes('UPDATE ops.dialogues')) return { rows: [], rowCount: 1 };
+      if (text.includes('FROM ops.dialogues')) return { rows: [openMorning('member1')] };
+      if (text.includes(`SET status = 'in_progress'`)) return { rows: [{ task_id: '7' }] };
+      return { rows: [] };
+    });
+
+    await handleMessage(pool, messageEvent('今日はA社の棚卸しをやります'), member);
+    const update = findCall(calls, `SET status = 'in_progress'`);
+    expect(update?.params).toEqual(['7', 'member1']);
+  });
+
+  it('started_task_id から数値を抽出できなければ着手更新をスキップする(対話応答は返す)', async () => {
+    mocks.generateJson.mockResolvedValueOnce({
+      value: { reply: '進めましょう。', hypothesis_complete: false, started_task_id: 'A社タスク' },
+      result: llmResult,
+    });
+    const { pool, calls } = createMockPool((text) => {
+      if (text.includes('FROM ops.suggestions')) return { rows: [] };
+      if (text.includes('UPDATE ops.dialogues')) return { rows: [], rowCount: 1 };
+      if (text.includes('FROM ops.dialogues')) return { rows: [openMorning('member1')] };
+      return { rows: [] };
+    });
+
+    const response = await handleMessage(pool, messageEvent('進めます'), member);
+    expect(findCall(calls, `SET status = 'in_progress'`)).toBeUndefined();
+    expect(response.text).toBe('進めましょう。');
   });
 });

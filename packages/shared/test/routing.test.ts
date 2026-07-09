@@ -41,20 +41,22 @@ describe('classifyMessage', () => {
 });
 
 describe('detectTaskInstruction(M3 タスク指示のルールベース判定)', () => {
-  it('「タスク:」「依頼:」プレフィックスは yes(全角・半角コロン)', () => {
+  it('「タスク:」「依頼:」プレフィックスのみ yes に確定する(全角・半角コロン)', () => {
     expect(detectTaskInstruction('タスク: A社の見積もり資料を作成')).toBe('yes');
     expect(detectTaskInstruction('タスク:A社の見積もり資料を作成')).toBe('yes');
     expect(detectTaskInstruction('依頼: 在庫レポートの更新')).toBe('yes');
   });
 
-  it('担当者+期限+依頼動詞が揃った平叙文は yes', () => {
+  it('担当者+期限+依頼動詞が揃っても yes に確定せず ambiguous(過検知防止で LLM 分類へ)', () => {
     expect(
       detectTaskInstruction('田中さんに金曜までにA社の見積もりを作成してもらうようお願いします'),
-    ).toBe('yes');
-    expect(detectTaskInstruction('佐藤さんに今週中にWMSの検証をやってもらってください')).toBe('yes');
+    ).toBe('ambiguous');
+    expect(detectTaskInstruction('佐藤さんに今週中にWMSの検証をやってもらってください')).toBe(
+      'ambiguous',
+    );
   });
 
-  it('担当者+期限+依頼動詞でも疑問文は ambiguous(相談の可能性)', () => {
+  it('疑問文は ambiguous(相談の可能性)', () => {
     expect(
       detectTaskInstruction('田中さんに金曜までに見積もり作成をお願いするべきですか?'),
     ).toBe('ambiguous');
@@ -63,6 +65,19 @@ describe('detectTaskInstruction(M3 タスク指示のルールベース判定)',
   it('シグナルが部分的なら ambiguous(LLM 分類へ)', () => {
     expect(detectTaskInstruction('田中さんにこの件をお願いしたい')).toBe('ambiguous');
     expect(detectTaskInstruction('今週中に在庫レポートをまとめてほしい')).toBe('ambiguous');
+  });
+
+  it('自分主語の宣言(「〜します」「〜しておきます」)は no(過検知の回帰ケース)', () => {
+    expect(detectTaskInstruction('山田さんに今日中に対応しておきます')).not.toBe('yes');
+    expect(detectTaskInstruction('山田さんに今日中に対応しておきます')).toBe('no');
+    expect(detectTaskInstruction('A社の見積もりは私が今日中に作成します')).toBe('no');
+    expect(detectTaskInstruction('明日までに資料をまとめて共有します')).toBe('no');
+  });
+
+  it('依頼先マーカー(お願い・ください等)があれば宣言扱いにしない', () => {
+    expect(detectTaskInstruction('田中さんに金曜までに対応してもらうようお願いします')).toBe(
+      'ambiguous',
+    );
   });
 
   it('通常の質問・報告は no', () => {

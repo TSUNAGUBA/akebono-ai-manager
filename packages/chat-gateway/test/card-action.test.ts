@@ -127,6 +127,24 @@ describe('decide_task(M3 承認カード)', () => {
     expect(findCall(calls, 'ROLLBACK')).toBeUndefined();
   });
 
+  it('却下の2度押しも現在状態の表示のみで、履歴を二重記録しない(冪等)', async () => {
+    const { pool, calls } = createMockPool((text) => {
+      if (text.includes(`SET status = 'cancelled'`)) return { rows: [] }; // 0行更新
+      if (text.includes('FROM ops.tasks WHERE task_id')) {
+        return { rows: [{ ...approvedTaskRow, status: 'cancelled' }] };
+      }
+      return undefined;
+    });
+    const result = (await handleCardAction(
+      pool,
+      cardEvent('decide_task', { taskId: '7', decision: 'reject' }),
+      admin,
+    )) as { cardsV2?: unknown[] };
+
+    expect(findCall(calls, 'INSERT INTO ops.task_status_log')).toBeUndefined();
+    expect(JSON.stringify(result.cardsV2)).toContain('処理済み');
+  });
+
   it('却下: cancelled へ遷移し、出し直しを促す', async () => {
     const { pool, calls } = createMockPool((text) => {
       if (text.includes(`SET status = 'cancelled'`)) {
@@ -289,6 +307,57 @@ describe('record_resolution(M6 裁定の記録)', () => {
     expect(chunkInsert?.text).toContain(`'decision_rules'`);
     expect(chunkInsert?.params[0]).toBe('escalation/5');
     expect(findCall(calls, 'SET knowledge_reflected = TRUE')).toBeDefined();
+    expect(JSON.stringify(result.cardsV2)).toContain('裁定済み');
+  });
+
+  it('再還流にも失敗したら「ナレッジ還流を再試行」ボタン付きカードを返す(復旧経路を維持)', async () => {
+    mocks.embedTexts.mockRejectedValueOnce(new Error('embedding down'));
+    const resolved = {
+      escalation_id: '5',
+      reason: 'low_confidence',
+      context: '質問: 種まきとは',
+      status: 'resolved',
+      resolution: '在庫僅少時は出荷優先で裁定する',
+      knowledge_reflected: false,
+    };
+    const { pool, calls } = createMockPool((text) => {
+      if (text.includes('SET resolution_requested_by')) return { rows: [] };
+      if (text.includes('FROM ops.escalations WHERE escalation_id')) return { rows: [resolved] };
+      return undefined;
+    });
+    const result = (await handleCardAction(
+      pool,
+      cardEvent('record_resolution', { escalationId: '5' }),
+      admin,
+    )) as { cardsV2?: unknown[] };
+
+    expect(findCall(calls, 'SET knowledge_reflected = TRUE')).toBeUndefined();
+    const json = JSON.stringify(result.cardsV2);
+    expect(json).toContain('ナレッジ還流を再試行');
+    expect(json).toContain('record_resolution'); // 再試行ボタンから同じ回復パスに到達できる
+  });
+
+  it('還流済みなら再試行ボタンを押しても再還流せず、裁定済みの表示のみ(冪等)', async () => {
+    const reflected = {
+      escalation_id: '5',
+      reason: 'low_confidence',
+      context: '質問: 種まきとは',
+      status: 'resolved',
+      resolution: '在庫僅少時は出荷優先で裁定する',
+      knowledge_reflected: true,
+    };
+    const { pool, calls } = createMockPool((text) => {
+      if (text.includes('SET resolution_requested_by')) return { rows: [] };
+      if (text.includes('FROM ops.escalations WHERE escalation_id')) return { rows: [reflected] };
+      return undefined;
+    });
+    const result = (await handleCardAction(
+      pool,
+      cardEvent('record_resolution', { escalationId: '5' }),
+      admin,
+    )) as { cardsV2?: unknown[] };
+
+    expect(findCall(calls, 'INSERT INTO rag.knowledge_chunks')).toBeUndefined();
     expect(JSON.stringify(result.cardsV2)).toContain('裁定済み');
   });
 

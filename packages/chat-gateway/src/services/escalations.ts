@@ -97,6 +97,24 @@ export async function requestResolutionRecording(
 }
 
 /**
+ * 「裁定の記録待ち」を解除する(管理者が「キャンセル」を送ったとき)。
+ * 受付状態(resolution_requested_*)のみクリアし、裁定・ステータスには触れない
+ * (記録系データを巻き戻さない)。既に解除済みでも壊れない(冪等)。
+ */
+export async function cancelResolutionRecording(
+  pool: pg.Pool,
+  escalationId: string,
+): Promise<void> {
+  await query(
+    pool,
+    `UPDATE ops.escalations
+     SET resolution_requested_by = NULL, resolution_requested_at = NULL
+     WHERE escalation_id = $1 AND status = 'open'`,
+    [escalationId],
+  );
+}
+
+/**
  * 「裁定待ち」のエスカレーションを探す: 本人が直近15分以内に「裁定を記録」を押した open のもの。
  * (suggestions の「理由待ち」パターンの再利用)
  */

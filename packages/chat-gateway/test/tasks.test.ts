@@ -69,6 +69,20 @@ describe('validateDecomposition(分解レスポンスの検証)', () => {
     expect(result.value.dueDate).toBeNull();
     expect(result.value.projectId).toBeNull();
   });
+
+  it('形式は正しいが実在しない期限日は null に落とす(起票クラッシュ防止)', () => {
+    for (const invalid of ['2026-06-31', '2026-13-01', '2026-02-29', '2026-00-10']) {
+      const result = validateDecomposition({ ...base, suggested_deadline: invalid }, users, projects);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.dueDate).toBeNull();
+    }
+    // 実在する閏日は有効なまま
+    const leap = validateDecomposition({ ...base, suggested_deadline: '2028-02-29' }, users, projects);
+    expect(leap.ok).toBe(true);
+    if (!leap.ok) return;
+    expect(leap.value.dueDate).toBe('2028-02-29');
+  });
 });
 
 describe('createProposedTask(proposed 登録+履歴)', () => {

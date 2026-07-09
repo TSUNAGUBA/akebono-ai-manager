@@ -2,6 +2,7 @@ import {
   confirmedReportCard,
   decidedSuggestionCard,
   escalationRecordingCard,
+  escalationRefluxRetryCard,
   escalationResolvedCard,
   logger,
   query,
@@ -253,7 +254,11 @@ async function recordResolutionAction(
       };
     } catch (err) {
       logger.error('裁定のナレッジ再還流に失敗しました', err, { escalationId });
-      return { text: 'ナレッジへの反映に失敗しました。時間をおいて再度お試しください。' };
+      // 再試行ボタン付きカードに差し替え、時間をおいて再度到達できるようにする(冪等)
+      return {
+        actionResponse: { type: 'UPDATE_MESSAGE' },
+        cardsV2: [escalationRefluxRetryCard(escalationId, existing.reason, existing.resolution)],
+      };
     }
   }
 

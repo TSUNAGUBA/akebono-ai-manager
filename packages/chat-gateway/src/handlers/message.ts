@@ -22,6 +22,7 @@ import {
   tierForCategory,
   type ChatAppMessage,
   type ChatTurn,
+  escalationRefluxRetryCard,
   looksLikeCompletionReport,
   suggestionCard,
 } from '@ai-manager/shared';
@@ -40,6 +41,7 @@ import {
   type DialogueTurn,
 } from '../services/dialogues.js';
 import {
+  cancelResolutionRecording,
   findAwaitingResolution,
   raiseEscalation,
   recordResolution,
@@ -89,6 +91,15 @@ interface MorningLlmResponse {
   started_task_id?: string;
 }
 
+/**
+ * LLM が返すタスク ID 表現('[ID:7]' / 'ID:7' / '7' のいずれの形式でも)から
+ * 数値部分を抽出する。抽出できなければ undefined(呼び出し側でスキップ)。
+ */
+function extractTaskId(raw: string): string | undefined {
+  const match = /^\s*\[?\s*(?:ID\s*[::]\s*)?(\d+)\s*\]?\s*$/i.exec(raw);
+  return match?.[1];
+}
+
 /** 朝の問答の継続: 仮説形成の壁打ち。仮説が揃ったら hypothesis を確定する。 */
 async function continueMorningDialogue(
   pool: pg.Pool,
@@ -118,19 +129,26 @@ async function continueMorningDialogue(
 
   // 「今日やる」と明確に言及されたタスクの approved → in_progress 遷移(M3)。
   // 補助処理のため失敗しても対話応答は返す。WHERE 条件(本人+approved)により非破壊・冪等。
-  if (value.started_task_id !== undefined && /^\d+$/.test(value.started_task_id)) {
-    try {
-      const started = await startTaskFromDialogue(pool, value.started_task_id, user.user_id);
-      if (started !== undefined) {
-        logger.info('朝の対話からタスクを着手中に更新しました', {
-          taskId: started.task_id,
-          userId: user.user_id,
+  if (value.started_task_id !== undefined && value.started_task_id !== '') {
+    const startedTaskId = extractTaskId(value.started_task_id);
+    if (startedTaskId === undefined) {
+      logger.debug('started_task_id からタスク ID を抽出できないためスキップします', {
+        startedTaskId: value.started_task_id,
+      });
+    } else {
+      try {
+        const started = await startTaskFromDialogue(pool, startedTaskId, user.user_id);
+        if (started !== undefined) {
+          logger.info('朝の対話からタスクを着手中に更新しました', {
+            taskId: started.task_id,
+            userId: user.user_id,
+          });
+        }
+      } catch (err) {
+        logger.error('対話からのタスク着手更新に失敗しました(処理は継続)', err, {
+          taskId: startedTaskId,
         });
       }
-    } catch (err) {
-      logger.error('対話からのタスク着手更新に失敗しました(処理は継続)', err, {
-        taskId: value.started_task_id,
-      });
     }
   }
   return { text: value.reply };
@@ -486,16 +504,66 @@ async function recordEscalationResolution(
     logger.error('裁定のナレッジ還流に失敗しました(裁定の記録は保持)', err, {
       escalationId,
     });
+    // 復旧経路: 「ナレッジ還流を再試行」ボタン付きカードを返す。
+    // ボタンは card-action の再還流分岐(knowledge_reflected=false の間のみ有効・冪等)に到達する
     return {
-      text: '裁定は記録しましたが、ナレッジへの反映に失敗しました。エスカレーションカードの「裁定を記録」を再度押すと再反映できます。',
+      text: '裁定は記録しましたが、ナレッジへの反映に失敗しました。「ナレッジ還流を再試行」を押すと再反映できます。',
+      cardsV2: [
+        escalationRefluxRetryCard(escalationId, resolved.reason, resolved.resolution ?? text),
+      ],
     };
   }
 }
 
+/** 裁定ゲートの中止ワード(「キャンセル」等)。 */
+const RESOLUTION_CANCEL_PATTERN = /^(キャンセル|やめる|やめます|やめて|中止|取り消し|取消)[。..!!]?$/;
+
+/** 裁定として記録するテキストの長さ上限。 */
+const RESOLUTION_MAX_LENGTH = 1000;
+
+/**
+ * 裁定ゲート内の管理者メッセージの処理(M6)。
+ * 提案理由受領ゲートと同様のガードを掛け、無条件キャプチャを防ぐ:
+ * - 「キャンセル」等 → ゲート解除(resolution_requested_at をクリア)して案内
+ * - タスク指示らしいメッセージ・疑問符で終わる質問・長さ上限超過 → 記録せず案内(ゲートは維持)
+ * - それ以外 → 従来どおり裁定として記録+decision_rules へ還流
+ */
+async function handleAwaitingResolutionMessage(
+  pool: pg.Pool,
+  user: OpsUser,
+  escalationId: string,
+  text: string,
+): Promise<ChatAppMessage> {
+  const trimmed = text.trim();
+  if (RESOLUTION_CANCEL_PATTERN.test(trimmed)) {
+    await cancelResolutionRecording(pool, escalationId);
+    return {
+      text: '裁定の記録を中止しました。記録する場合は、エスカレーションカードの「裁定を記録」をもう一度押してください。',
+    };
+  }
+  if (trimmed.length > RESOLUTION_MAX_LENGTH) {
+    return {
+      text: `裁定が長すぎるため記録しませんでした(${RESOLUTION_MAX_LENGTH}字以内)。裁定の記録待ちです。裁定を入力するか「キャンセル」と送ってください。`,
+    };
+  }
+  // 疑問符で終わる質問、タスク指示に合致するメッセージは裁定として記録しない。
+  // タスク指示判定は isTaskInstruction を再利用(ルールベース確定はプレフィックスのみ、
+  // 曖昧なシグナルは flash-lite 分類)。担当者への言及を含む正当な裁定を締め出さないため、
+  // ルールベースのシグナルだけでは弾かない
+  if (/[??]\s*$/.test(trimmed) || (await isTaskInstruction(user, trimmed))) {
+    return {
+      text: '裁定の記録待ちです。裁定を入力するか「キャンセル」と送ってください。',
+    };
+  }
+  return recordEscalationResolution(pool, user, escalationId, text);
+}
+
 /**
  * MESSAGE イベントのハンドラ。
- * 優先順: 裁定の受領(管理者) → 提案理由の受領 → タスク指示の検知(管理者)
- *        → 進行中の朝夕対話の継続 → 完了申告の検知 → 随時 QA
+ * 優先順: 裁定の受領(管理者) → 提案理由の受領 → 進行中の朝夕対話の継続
+ *        → タスク指示の検知(管理者) → 完了申告の検知 → 随時 QA
+ * (進行中対話の継続をタスク指示検知より先に評価し、朝夕対話の途中のメッセージが
+ *  タスク起票に横取りされないようにする)
  */
 export async function handleMessage(
   pool: pg.Pool,
@@ -513,7 +581,7 @@ export async function handleMessage(
   if (user.role === 'admin') {
     const awaitingEscalation = await findAwaitingResolution(pool, user.user_id);
     if (awaitingEscalation !== undefined) {
-      return recordEscalationResolution(pool, user, awaitingEscalation.escalation_id, text);
+      return handleAwaitingResolutionMessage(pool, user, awaitingEscalation.escalation_id, text);
     }
   }
 
@@ -526,16 +594,17 @@ export async function handleMessage(
     };
   }
 
-  // 管理者のタスク指示(M3)。ルールベース先行+曖昧な場合のみ flash-lite で分類
-  if (await isTaskInstruction(user, text)) {
-    return handleTaskInstruction(pool, user, text);
-  }
-
+  // 進行中の朝夕対話の継続を最優先で評価する(タスク指示検知による横取り防止)
   const open = await findOpenDialogue(pool, user.user_id, jstDateString());
   if (open !== undefined) {
     return open.dialogue_type === 'morning_checkin'
       ? continueMorningDialogue(pool, user, open, text)
       : continueEveningDialogue(pool, user, open, text);
+  }
+
+  // 管理者のタスク指示(M3)。ルールベース先行+曖昧な場合のみ flash-lite で分類
+  if (await isTaskInstruction(user, text)) {
+    return handleTaskInstruction(pool, user, text);
   }
 
   if (looksLikeCompletionReport(text)) {

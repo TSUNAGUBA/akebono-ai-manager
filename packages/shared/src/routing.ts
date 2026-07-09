@@ -88,7 +88,8 @@ export function looksLikeCompletionReport(text: string): boolean {
 
 // ── タスク指示の検知(M3)─────────────────────────────────────────
 // 管理者のメッセージが「メンバーへのタスク指示」かをルールベースで先行判定する。
-// 確実なパターンのみ 'yes' とし、部分的なシグナルは 'ambiguous' として
+// ルールベースで 'yes'(確定)とするのは明示プレフィックスのみ。
+// ヒューリスティック一致は過検知防止のため 'ambiguous' に留め、
 // flash-lite での分類(TASK_INSTRUCTION_CLASSIFY_*)に委ねる。
 
 export type TaskInstructionSignal = 'yes' | 'ambiguous' | 'no';
@@ -107,24 +108,39 @@ const REQUEST_VERB_PATTERN =
   /(お願い|依頼|頼(み|んで)|やって|進めて|対応して|作成して|作って|準備して|まとめて|調整して|確認して|共有して|送って|渡して|任せ|アサイン|振って)/;
 
 /**
+ * 依頼先マーカー(お願い・ください・〜してもらう等)。
+ * これらがあれば「自分主語の宣言」ではなく、相手への依頼の可能性が残る。
+ */
+const REQUEST_DIRECTED_PATTERN = /(お願い|願います|ください|下さい|もら[うぅいえおっ]|ほしい|欲しい)/;
+
+/**
+ * 自分主語の宣言の文末(「〜します」「〜しておきます」等)。
+ * 話者本人の予定・報告であり、メンバーへの依頼ではない。
+ */
+const SELF_DECLARATION_ENDING_PATTERN =
+  /(します|いたします|致します|おきます|やります|進めます)[。..!!]?\s*$/;
+
+/**
  * タスク指示らしさのルールベース判定(M3)。
- * - 'yes':       プレフィックス、または 担当者+期限+依頼動詞 が揃った平叙文
- * - 'ambiguous': 担当者または期限+依頼動詞(疑問文を含む)→ LLM 分類へ
- * - 'no':        それ以外(通常の QA・対話として処理)
+ * - 'yes':       明示プレフィックス(「タスク:」「依頼:」)のみ(過検知防止のため確定はここに限定)
+ * - 'ambiguous': 担当者・期限・依頼動詞のヒューリスティック一致 → flash-lite 分類へ
+ * - 'no':        自分主語の宣言(「〜します」「〜しておきます」)・通常の QA・対話
  */
 export function detectTaskInstruction(text: string): TaskInstructionSignal {
   const trimmed = text.trim();
   if (TASK_PREFIX_PATTERN.test(trimmed)) return 'yes';
 
+  // 「山田さんに今日中に対応しておきます」のような自分主語の宣言は依頼ではない。
+  // ただし「〜してもらうようお願いします」等の依頼先マーカーがあれば宣言とみなさない
+  if (SELF_DECLARATION_ENDING_PATTERN.test(trimmed) && !REQUEST_DIRECTED_PATTERN.test(trimmed)) {
+    return 'no';
+  }
+
   const hasAssignee = ASSIGNEE_PATTERN.test(trimmed);
   const hasDeadline = DEADLINE_PATTERN.test(trimmed);
   const hasRequestVerb = REQUEST_VERB_PATTERN.test(trimmed);
-  const isQuestion = /[??]\s*$/.test(trimmed);
 
-  if (hasAssignee && hasDeadline && hasRequestVerb) {
-    // 疑問文(「〜してもらうべきですか?」等)は相談の可能性があるため LLM に委ねる
-    return isQuestion ? 'ambiguous' : 'yes';
-  }
+  // 担当者+期限+依頼動詞が揃っても確定はしない(疑問文・相談・宣言の誤検知があるため LLM 分類へ)
   if ((hasAssignee || hasDeadline) && hasRequestVerb) return 'ambiguous';
   return 'no';
 }
