@@ -53,3 +53,7 @@
 | コード | 意味 | 主な対処 |
 |---|---|---|
 | AIM-6001 | ダッシュボードのクエリ失敗 | dwh スキーマの ETL 実行状況、ai_manager_dashboard_ro の GRANT を確認 |
+| AIM-6002 | マスタ管理が未構成 | `DASHBOARD_ADMIN_DB_ENABLED=true` と GCP シークレット `ai-manager-db-master-admin-*` の登録、ai_manager_admin_rw ロールの作成を確認(deployment-setup.md Step 7) |
+| AIM-6003 | CSRF トークン不一致 | ブラウザの再読み込みでフォームを取得し直す。頻発時は Cookie がブロックされていないか確認 |
+| AIM-6004 | マスタ管理の入力不正 | 画面のエラーメッセージに従い入力を修正(新規 ID は半角小文字英数と _ - のみ) |
+| AIM-6005 | マスタ管理の書込競合 | 既に存在する ID(一意制約)か、使用中で削除できない参照(外部キー)。画面のメッセージを確認 |
