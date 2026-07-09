@@ -9,7 +9,12 @@ import {
 import type http from 'node:http';
 import type pg from 'pg';
 import { resolveUser, verifyChatRequest } from './auth.js';
-import { messageText, type ChatEvent } from './chat-event.js';
+import {
+  messageText,
+  normalizeChatEvent,
+  wrapChatResponse,
+  type ChatEvent,
+} from './chat-event.js';
 import { handleCardAction } from './handlers/card-action.js';
 import { handleMessage } from './handlers/message.js';
 
@@ -70,20 +75,24 @@ export function createChatGatewayServer(pool: pg.Pool): http.Server {
       path: '/',
       handler: async (req, res) => {
         await verifyChatRequest(req);
-        const event = await readJsonBody<ChatEvent>(req);
+        const raw = await readJsonBody<unknown>(req);
+        // 新方式(アドオン基盤経由)と旧方式のどちらで届いても処理できるよう正規化し、
+        // 応答も受信時の形式に合わせてラップする
+        const { event, mode } = normalizeChatEvent(raw);
         try {
           const response = await dispatchEvent(pool, event);
-          sendJson(res, 200, response ?? {});
+          sendJson(res, 200, wrapChatResponse(mode, response));
         } catch (err) {
           // Chat 上のユーザー体験を守るため、処理エラーは 200 + 文言で返しつつログに残す
           logger.error('Chat イベント処理に失敗しました', err, {
             type: event.type,
+            mode,
             text: messageText(event).slice(0, 80),
           });
           const fallback: ChatAppMessage = {
             text: '申し訳ありません、処理中にエラーが発生しました。少し時間をおいて再度お試しください。解決しない場合は管理者に連絡してください。',
           };
-          sendJson(res, 200, fallback);
+          sendJson(res, 200, wrapChatResponse(mode, fallback));
         }
       },
     },
