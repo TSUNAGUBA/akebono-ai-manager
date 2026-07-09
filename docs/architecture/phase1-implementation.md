@@ -165,7 +165,8 @@ sequenceDiagram
 - **備考**: IAP の有効/無効は deploy.yml で宣言的に管理しない(`gcloud run deploy` は IAP 状態を変更しないため
   手動切替が再デプロイで巻き戻ることはない)。`--iap` は IAP API 有効化・サービスエージェントへの
   invoker 付与という手動前提を要し、deploy.yml に含めると前提未達でデプロイ全体が失敗するため、
-  一回きりの手動操作とし、誤設定はデプロイ時の fail-fast(AUTH_MODE=iap × audience 未設定)で検出する
+  一回きりの手動操作とし、誤設定はデプロイ時の fail-fast(direct-iap × AUTH_MODE=iap × audience 未設定。
+  lb-iap では LB 構築前の初期状態として意図的に許容)で検出する
 
 ## 6. 未決事項(要件 §13)への Phase 1 時点の回答
 
