@@ -64,8 +64,8 @@ describe('ダッシュボード各ページの SQL パラメータ整合', () =>
   for (const [name, render] of pages) {
     it(`${name}: 実行された全クエリでプレースホルダ数とパラメータ数が一致する`, async () => {
       const captured: CapturedCall[] = [];
-      // 空行データで後段の描画が失敗しても、そこまでに発行されたクエリは検証する
-      await render(stubPool(captured)).catch(() => undefined);
+      // 空行データでの描画クラッシュもこのテストで検知する(握りつぶさない)
+      await render(stubPool(captured));
       assertCallsValid(captured);
     });
   }
