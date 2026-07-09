@@ -66,7 +66,19 @@ export function loadDbConfig(): DbConfig {
 
 export interface VertexConfig {
   projectId: string;
-  region: string;
+  /**
+   * 生成系モデル(generateContent)の呼び出し先ロケーション。既定は 'global'。
+   * gemini-2.5-flash-lite 等は asia-northeast1 では未提供(グローバルでは提供)のため、
+   * 未提供のリージョナルエンドポイントに投げると HTTP 404(AIM-4001)になる。
+   * データレジデンシー要件がある場合は VERTEX_LOCATION でリージョンを指定し、
+   * そのリージョンで提供されているモデルを MODEL_* で選ぶこと。
+   */
+  location: string;
+  /**
+   * embedding(predict)の呼び出し先ロケーション。既定は GCP_REGION。
+   * gemini-embedding-001 は asia-northeast1 を含むリージョナル提供がある。
+   */
+  embeddingLocation: string;
   models: {
     /** 定型(挨拶・進捗確認・要約・分類) */
     flashLite: string;
@@ -82,17 +94,26 @@ export interface VertexConfig {
   };
 }
 
+/** URL・識別子に埋め込む値は前後空白を除去し、空白のみなら既定値扱いにする(誤設定への事故耐性)。 */
+function trimmedEnv(name: string, defaultValue: string): string {
+  const value = optionalEnv(name, defaultValue).trim();
+  return value === '' ? defaultValue : value;
+}
+
 export function loadVertexConfig(): VertexConfig {
+  // GCP_REGION はデプロイ先リージョン。embedding はリージョナル提供があるため既定でこれに追従する
+  const region = trimmedEnv('GCP_REGION', 'asia-northeast1');
   return {
     projectId: requireEnv('GCP_PROJECT_ID'),
-    region: optionalEnv('GCP_REGION', 'asia-northeast1'),
+    location: trimmedEnv('VERTEX_LOCATION', 'global'),
+    embeddingLocation: trimmedEnv('VERTEX_EMBEDDING_LOCATION', region),
     models: {
-      flashLite: optionalEnv('MODEL_FLASH_LITE', 'gemini-2.5-flash-lite'),
-      flash: optionalEnv('MODEL_FLASH', 'gemini-2.5-flash'),
-      pro: optionalEnv('MODEL_PRO', 'gemini-2.5-pro'),
+      flashLite: trimmedEnv('MODEL_FLASH_LITE', 'gemini-2.5-flash-lite'),
+      flash: trimmedEnv('MODEL_FLASH', 'gemini-2.5-flash'),
+      pro: trimmedEnv('MODEL_PRO', 'gemini-2.5-pro'),
     },
     embedding: {
-      model: optionalEnv('EMBEDDING_MODEL', 'gemini-embedding-001'),
+      model: trimmedEnv('EMBEDDING_MODEL', 'gemini-embedding-001'),
       dimensions: optionalIntEnv('EMBEDDING_DIMENSIONS', 768),
     },
   };

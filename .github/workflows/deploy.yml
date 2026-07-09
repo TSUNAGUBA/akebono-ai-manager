@@ -122,15 +122,24 @@ jobs:
           GCP_RUNTIME_SERVICE_ACCOUNT: ${{ secrets.GCP_RUNTIME_SERVICE_ACCOUNT }}
           GCP_VPC_CONNECTOR: ${{ secrets.GCP_VPC_CONNECTOR }}
           ADMIN_SPACE_ID: ${{ secrets.ADMIN_SPACE_ID }}
+          VERTEX_LOCATION: ${{ secrets.VERTEX_LOCATION }}
+          VERTEX_EMBEDDING_LOCATION: ${{ secrets.VERTEX_EMBEDDING_LOCATION }}
+          MODEL_FLASH_LITE: ${{ secrets.MODEL_FLASH_LITE }}
+          MODEL_FLASH: ${{ secrets.MODEL_FLASH }}
+          MODEL_PRO: ${{ secrets.MODEL_PRO }}
+          MODEL_PRICING_JSON: ${{ secrets.MODEL_PRICING_JSON }}
+          EMBEDDING_MODEL: ${{ secrets.EMBEDDING_MODEL }}
         run: |
           VPC_FLAGS=()
           if [ -n "$GCP_VPC_CONNECTOR" ]; then
             VPC_FLAGS=(--vpc-connector "$GCP_VPC_CONNECTOR" --vpc-egress all-traffic)
           fi
-          ENV_VARS="GCP_PROJECT_ID=${GCP_PROJECT_ID},GCP_REGION=${GCP_REGION},GCP_PROJECT_NUMBER=${GCP_PROJECT_NUMBER}"
-          if [ -n "$ADMIN_SPACE_ID" ]; then
-            ENV_VARS="${ENV_VARS},ADMIN_SPACE_ID=${ADMIN_SPACE_ID}"
-          fi
+          # MODEL_PRICING_JSON はカンマを含むため、gcloud の代替デリミタ構文(^|^)で連結する
+          ENV_VARS="GCP_PROJECT_ID=${GCP_PROJECT_ID}|GCP_REGION=${GCP_REGION}|GCP_PROJECT_NUMBER=${GCP_PROJECT_NUMBER}"
+          # 任意の Vertex 設定(未設定ならコード側の既定値: 生成系 global / embedding は GCP_REGION)
+          for name in ADMIN_SPACE_ID VERTEX_LOCATION VERTEX_EMBEDDING_LOCATION MODEL_FLASH_LITE MODEL_FLASH MODEL_PRO MODEL_PRICING_JSON EMBEDDING_MODEL; do
+            if [ -n "${!name}" ]; then ENV_VARS="${ENV_VARS}|${name}=${!name}"; fi
+          done
           # Chat からのリクエストはアプリ層で JWT 検証するため公開エンドポイントとする
           gcloud run deploy ai-manager-chat-gateway \
             --project "$GCP_PROJECT_ID" \
@@ -140,7 +149,7 @@ jobs:
             --args packages/chat-gateway/dist/index.js \
             --service-account "$GCP_RUNTIME_SERVICE_ACCOUNT" \
             --allow-unauthenticated \
-            --set-env-vars "$ENV_VARS" \
+            --set-env-vars "^|^${ENV_VARS}" \
             --set-secrets "DB_HOST=ai-manager-db-host:latest,DB_NAME=ai-manager-db-name:latest,DB_USER=ai-manager-db-app-user:latest,DB_PASSWORD=ai-manager-db-app-password:latest" \
             --min-instances 0 \
             --max-instances 3 \
@@ -157,15 +166,24 @@ jobs:
           GCP_RUNTIME_SERVICE_ACCOUNT: ${{ secrets.GCP_RUNTIME_SERVICE_ACCOUNT }}
           GCP_VPC_CONNECTOR: ${{ secrets.GCP_VPC_CONNECTOR }}
           KNOWLEDGE_DRIVE_FOLDER_ID: ${{ secrets.KNOWLEDGE_DRIVE_FOLDER_ID }}
+          VERTEX_LOCATION: ${{ secrets.VERTEX_LOCATION }}
+          VERTEX_EMBEDDING_LOCATION: ${{ secrets.VERTEX_EMBEDDING_LOCATION }}
+          MODEL_FLASH_LITE: ${{ secrets.MODEL_FLASH_LITE }}
+          MODEL_FLASH: ${{ secrets.MODEL_FLASH }}
+          MODEL_PRO: ${{ secrets.MODEL_PRO }}
+          MODEL_PRICING_JSON: ${{ secrets.MODEL_PRICING_JSON }}
+          EMBEDDING_MODEL: ${{ secrets.EMBEDDING_MODEL }}
         run: |
           VPC_FLAGS=()
           if [ -n "$GCP_VPC_CONNECTOR" ]; then
             VPC_FLAGS=(--vpc-connector "$GCP_VPC_CONNECTOR" --vpc-egress all-traffic)
           fi
-          ENV_VARS="GCP_PROJECT_ID=${GCP_PROJECT_ID},GCP_REGION=${GCP_REGION},BATCH_INVOKER_SA=${GCP_RUNTIME_SERVICE_ACCOUNT}"
-          if [ -n "$KNOWLEDGE_DRIVE_FOLDER_ID" ]; then
-            ENV_VARS="${ENV_VARS},KNOWLEDGE_DRIVE_FOLDER_ID=${KNOWLEDGE_DRIVE_FOLDER_ID}"
-          fi
+          # MODEL_PRICING_JSON はカンマを含むため、gcloud の代替デリミタ構文(^|^)で連結する
+          ENV_VARS="GCP_PROJECT_ID=${GCP_PROJECT_ID}|GCP_REGION=${GCP_REGION}|BATCH_INVOKER_SA=${GCP_RUNTIME_SERVICE_ACCOUNT}"
+          # 任意の Vertex 設定(未設定ならコード側の既定値: 生成系 global / embedding は GCP_REGION)
+          for name in KNOWLEDGE_DRIVE_FOLDER_ID VERTEX_LOCATION VERTEX_EMBEDDING_LOCATION MODEL_FLASH_LITE MODEL_FLASH MODEL_PRO MODEL_PRICING_JSON EMBEDDING_MODEL; do
+            if [ -n "${!name}" ]; then ENV_VARS="${ENV_VARS}|${name}=${!name}"; fi
+          done
           # Scheduler(OIDC)のみ呼び出し可。IAM +アプリ層検証の多層防御
           gcloud run deploy ai-manager-batch \
             --project "$GCP_PROJECT_ID" \
@@ -175,7 +193,7 @@ jobs:
             --args packages/batch/dist/index.js \
             --service-account "$GCP_RUNTIME_SERVICE_ACCOUNT" \
             --no-allow-unauthenticated \
-            --set-env-vars "$ENV_VARS" \
+            --set-env-vars "^|^${ENV_VARS}" \
             --set-secrets "DB_HOST=ai-manager-db-host:latest,DB_NAME=ai-manager-db-name:latest,DB_USER=ai-manager-db-app-user:latest,DB_PASSWORD=ai-manager-db-app-password:latest" \
             --min-instances 0 \
             --max-instances 1 \
