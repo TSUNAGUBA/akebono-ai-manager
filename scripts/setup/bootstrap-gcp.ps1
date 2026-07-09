@@ -199,8 +199,9 @@ $config = [ordered]@{
   GCP_VPC_CONNECTOR              = ''
   ADMIN_SPACE_ID                 = ''
   KNOWLEDGE_DRIVE_FOLDER_ID      = ''
-  DASHBOARD_AUTH_MODE            = 'iap'
+  DASHBOARD_AUTH_MODE            = ''
   DASHBOARD_IAP_AUDIENCE         = ''
+  DASHBOARD_EXPOSURE             = ''
   VERTEX_LOCATION                = ''
   VERTEX_EMBEDDING_LOCATION      = ''
   MODEL_FLASH_LITE               = ''
@@ -214,7 +215,7 @@ $config = [ordered]@{
 # 必須項目(GCP_* のリソース名)は常に最新の実値で再計算する。
 $operatorEditableKeys = @(
   'GCP_VPC_CONNECTOR', 'ADMIN_SPACE_ID', 'KNOWLEDGE_DRIVE_FOLDER_ID',
-  'DASHBOARD_AUTH_MODE', 'DASHBOARD_IAP_AUDIENCE',
+  'DASHBOARD_AUTH_MODE', 'DASHBOARD_IAP_AUDIENCE', 'DASHBOARD_EXPOSURE',
   'VERTEX_LOCATION', 'VERTEX_EMBEDDING_LOCATION',
   'MODEL_FLASH_LITE', 'MODEL_FLASH', 'MODEL_PRO', 'MODEL_PRICING_JSON', 'EMBEDDING_MODEL'
 )

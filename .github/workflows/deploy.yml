@@ -215,17 +215,29 @@ jobs:
           GCP_VPC_CONNECTOR: ${{ secrets.GCP_VPC_CONNECTOR }}
           DASHBOARD_AUTH_MODE: ${{ secrets.DASHBOARD_AUTH_MODE }}
           DASHBOARD_IAP_AUDIENCE: ${{ secrets.DASHBOARD_IAP_AUDIENCE }}
+          DASHBOARD_EXPOSURE: ${{ secrets.DASHBOARD_EXPOSURE }}
         run: |
           VPC_FLAGS=()
           if [ -n "$GCP_VPC_CONNECTOR" ]; then
             VPC_FLAGS=(--vpc-connector "$GCP_VPC_CONNECTOR" --vpc-egress all-traffic)
           fi
-          ENV_VARS="GCP_PROJECT_ID=${GCP_PROJECT_ID},GCP_REGION=${GCP_REGION},AUTH_MODE=${DASHBOARD_AUTH_MODE:-iap},DB_POOL_MAX=5"
+          # 公開モード(手順: docs/operations/deployment-setup.md Step 7-4):
+          #   lb-iap(既定): LB+IAP 経由のみ許可し、*.run.app への直接アクセスを ingress で遮断
+          #   direct-iap  : Cloud Run 直付け IAP(MVP 向け・LB 不要)。*.run.app を IAP 保護のまま公開。
+          #                 IAP 有効化(一回)は手動 — 未実施でも --no-allow-unauthenticated のため全拒否で安全側
+          case "${DASHBOARD_EXPOSURE:-lb-iap}" in
+            lb-iap)     INGRESS=internal-and-cloud-load-balancing; AUTH_FLAG=--allow-unauthenticated;    DEFAULT_AUTH_MODE=iap ;;
+            direct-iap) INGRESS=all;                               AUTH_FLAG=--no-allow-unauthenticated; DEFAULT_AUTH_MODE=header ;;
+            *)
+              echo "::error::DASHBOARD_EXPOSURE は lb-iap / direct-iap のいずれかです(現在値: ${DASHBOARD_EXPOSURE})"
+              exit 1
+              ;;
+          esac
+          ENV_VARS="GCP_PROJECT_ID=${GCP_PROJECT_ID},GCP_REGION=${GCP_REGION},AUTH_MODE=${DASHBOARD_AUTH_MODE:-$DEFAULT_AUTH_MODE},DB_POOL_MAX=5"
           if [ -n "$DASHBOARD_IAP_AUDIENCE" ]; then
             ENV_VARS="${ENV_VARS},IAP_AUDIENCE=${DASHBOARD_IAP_AUDIENCE}"
           fi
-          # 認証はアプリ層(IAP JWT 検証)+ingress 制限の多層防御:
-          # LB(IAP)経由のみ許可し、*.run.app への直接アクセスをネットワーク層で遮断する
+          # 認証は IAP(ネットワーク層)+アプリ層検証の多層防御
           gcloud run deploy ai-manager-dashboard \
             --project "$GCP_PROJECT_ID" \
             --region "$GCP_REGION" \
@@ -233,8 +245,8 @@ jobs:
             --command node \
             --args packages/dashboard/dist/index.js \
             --service-account "$GCP_RUNTIME_SERVICE_ACCOUNT" \
-            --allow-unauthenticated \
-            --ingress internal-and-cloud-load-balancing \
+            "$AUTH_FLAG" \
+            --ingress "$INGRESS" \
             --set-env-vars "$ENV_VARS" \
             --set-secrets "DB_HOST=ai-manager-db-host:latest,DB_NAME=ai-manager-db-name:latest,DB_USER=ai-manager-db-dashboard-user:latest,DB_PASSWORD=ai-manager-db-dashboard-password:latest" \
             --min-instances 0 \
