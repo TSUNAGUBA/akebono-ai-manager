@@ -73,7 +73,7 @@ sequenceDiagram
 |---|---|
 | Google Chat → chat-gateway | Chat 発行 JWT の署名・発行者・audience(プロジェクト番号)検証 |
 | Cloud Scheduler → batch | Cloud Run IAM(--no-allow-unauthenticated)+アプリ層 OIDC 検証(発行者・audience・呼び出し元 SA)の多層防御 |
-| ブラウザ → dashboard | IAP JWT の署名検証(AUTH_MODE=iap)。ロール(admin/member)は ops.users で解決し、管理者限定ページを分離 |
+| ブラウザ → dashboard | ingress を LB(IAP)経由のみに制限+IAP JWT の署名検証(AUTH_MODE=iap)の多層防御。ロール(admin/member)は ops.users で解決し、管理者限定ページを分離 |
 | GitHub Actions → GCP | Workload Identity Federation(キーレス)。attribute-condition で対象リポジトリに限定 |
 | アプリ → RDS | SSL 必須+CA 検証、DB ユーザー分離(app_rw / dashboard_ro / 管理)、dashboard_ro は生の対話ログ参照不可 |
 
@@ -83,7 +83,8 @@ sequenceDiagram
 
 - **決定**: Flyway / Prisma 等を導入せず、SQL ファイル+軽量ランナー(`packages/db/src/migrate.ts`)を実装
 - **理由**: 要件の DDL が SQL で確定しており、pgvector / パーティション / plpgsql 関数など生 SQL が必須。
-  versioned(一度だけ)+repeatable(チェックサム変更で再適用)の Flyway 相当の意味論を 200 行弱で実現でき、依存を増やさない
+  versioned(一度だけ)+repeatable(毎回適用・冪等。ビュー/ETL関数/GRANT/pg_cron 登録)の意味論を 200 行弱で実現でき、依存を増やさない。
+  repeatable を毎回適用にすることで「後から DB ロールを作成」「後から pg_cron を有効化」した場合も db-migrate ジョブ再実行だけで反映される(手動回復パス不要)
 - **トレードオフ**: ロールバック機能なし(前方修正のみ)。小規模チームでは許容
 
 ### ADR-2: M5 ダッシュボードは Looker Studio ではなく自前 Web アプリ

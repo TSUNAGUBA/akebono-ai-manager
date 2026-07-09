@@ -170,7 +170,8 @@ DECLARE
   i       INT;
 BEGIN
   FOREACH v_table IN ARRAY ARRAY['fact_task_activity', 'fact_dialogue'] LOOP
-    FOR i IN 0..p_months_ahead LOOP
+    -- i = -1(前月)から作成する(ops.ensure_dialogue_partitions と同じ月境界対策)
+    FOR i IN -1..p_months_ahead LOOP
       v_start := date_trunc('month', (now() AT TIME ZONE 'Asia/Tokyo')::date) + make_interval(months => i);
       v_name  := v_table || '_' || to_char(v_start, 'YYYYMM');
       IF NOT EXISTS (

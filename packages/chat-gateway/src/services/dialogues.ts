@@ -1,4 +1,4 @@
-import { query } from '@ai-manager/shared';
+import { AppError, ERROR_CODES, query } from '@ai-manager/shared';
 import type pg from 'pg';
 
 /** ops.dialogues.turns の1要素 */
@@ -120,27 +120,31 @@ export interface AppendTurnsUpdate {
   costUsd?: number;
 }
 
-/** 対話にターンを追記し、確定した仮説・レビュー・トークン累計を更新する。 */
+/**
+ * 対話にターンを追記し、確定した仮説・レビュー・トークン累計を更新する。
+ * WHERE 句は dialogue_id のみ(IDENTITY で一意)。created_at を条件に含めると、
+ * node-postgres の timestamptz 丸め(µs→ms)により等値比較が恒常的に不成立となり
+ * 0行更新のサイレント障害になるため使用しない。
+ */
 export async function appendTurns(
   pool: pg.Pool,
-  dialogue: Pick<DialogueRow, 'dialogue_id' | 'created_at'>,
+  dialogue: Pick<DialogueRow, 'dialogue_id'>,
   newTurns: DialogueTurn[],
   update: AppendTurnsUpdate = {},
 ): Promise<void> {
-  await query(
+  const result = await query(
     pool,
     `UPDATE ops.dialogues SET
-       turns = turns || $3::jsonb,
-       hypothesis = COALESCE($4::jsonb, hypothesis),
-       review = COALESCE($5::jsonb, review),
-       model_used = COALESCE($6, model_used),
-       input_tokens = COALESCE(input_tokens, 0) + COALESCE($7, 0),
-       output_tokens = COALESCE(output_tokens, 0) + COALESCE($8, 0),
-       cost_usd = COALESCE(cost_usd, 0) + COALESCE($9, 0)
-     WHERE dialogue_id = $1 AND created_at = $2`,
+       turns = turns || $2::jsonb,
+       hypothesis = COALESCE($3::jsonb, hypothesis),
+       review = COALESCE($4::jsonb, review),
+       model_used = COALESCE($5, model_used),
+       input_tokens = COALESCE(input_tokens, 0) + COALESCE($6, 0),
+       output_tokens = COALESCE(output_tokens, 0) + COALESCE($7, 0),
+       cost_usd = COALESCE(cost_usd, 0) + COALESCE($8, 0)
+     WHERE dialogue_id = $1`,
     [
       dialogue.dialogue_id,
-      dialogue.created_at,
       JSON.stringify(newTurns),
       update.hypothesis === undefined ? null : JSON.stringify(update.hypothesis),
       update.review === undefined ? null : JSON.stringify(update.review),
@@ -150,6 +154,12 @@ export async function appendTurns(
       update.costUsd ?? null,
     ],
   );
+  if (result.rowCount === 0) {
+    // 0行更新は対話ログの欠落を意味するためサイレントにしない
+    throw new AppError(ERROR_CODES.DB_QUERY_FAILED, '対話ターンの保存対象が見つかりませんでした', {
+      details: { dialogueId: dialogue.dialogue_id },
+    });
+  }
 }
 
 export function nowTurn(role: 'ai' | 'user', content: string): DialogueTurn {

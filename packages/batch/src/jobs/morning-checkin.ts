@@ -154,10 +154,27 @@ export async function runMorningCheckin(pool: pg.Pool): Promise<JobSummary> {
           costUsd,
         ],
       );
-      await sendChatMessage(member.chat_space_id, { text: messageText });
+      const dialogueId = inserted.rows[0]?.dialogue_id;
+      try {
+        await sendChatMessage(member.chat_space_id, { text: messageText });
+      } catch (sendErr) {
+        // 配信に失敗したまま対話レコードが残ると、冪等チェックにより
+        // 再実行してもそのユーザーへ二度と配信されないため、補償として削除する
+        if (dialogueId !== undefined) {
+          await query(pool, 'DELETE FROM ops.dialogues WHERE dialogue_id = $1', [dialogueId]).catch(
+            (cleanupErr: unknown) => {
+              logger.error('配信失敗後の対話レコード削除に失敗しました(再実行時に skipped になります)', cleanupErr, {
+                userId: member.user_id,
+                dialogueId,
+              });
+            },
+          );
+        }
+        throw sendErr;
+      }
       logger.info('朝の問いかけを配信しました', {
         userId: member.user_id,
-        dialogueId: inserted.rows[0]?.dialogue_id,
+        dialogueId,
       });
       summary.sent += 1;
     } catch (err) {

@@ -176,7 +176,11 @@ interface EmbedResponse {
 
 export type EmbeddingTaskType = 'RETRIEVAL_DOCUMENT' | 'RETRIEVAL_QUERY';
 
-/** テキストのベクトル化。rag スキーマの vector(768) に合わせ outputDimensionality を指定する。 */
+/**
+ * テキストのベクトル化。rag スキーマの vector(768) に合わせ outputDimensionality を指定する。
+ * gemini-embedding-001 は 1 リクエスト 1 インスタンスのみ対応のため、逐次で 1 件ずつ呼び出す
+ * (複数インスタンスを詰めると HTTP 400 になる)。
+ */
 export async function embedTexts(
   texts: string[],
   taskType: EmbeddingTaskType,
@@ -184,26 +188,23 @@ export async function embedTexts(
 ): Promise<number[][]> {
   if (texts.length === 0) return [];
   const url = `https://${config.region}-aiplatform.googleapis.com/v1/projects/${config.projectId}/locations/${config.region}/publishers/google/models/${config.embedding.model}:predict`;
-  const body = {
-    instances: texts.map((text) => ({ content: text, task_type: taskType })),
-    parameters: { outputDimensionality: config.embedding.dimensions },
-  };
-  const json = (await callVertex(url, body, ERROR_CODES.EMBEDDING_FAILED)) as EmbedResponse;
-  const predictions = json.predictions ?? [];
-  if (predictions.length !== texts.length) {
-    throw new AppError(ERROR_CODES.EMBEDDING_FAILED, 'Embedding 応答の件数が入力と一致しません', {
-      details: { expected: texts.length, actual: predictions.length },
-    });
-  }
-  return predictions.map((p, i) => {
-    const values = p.embeddings?.values;
+
+  const results: number[][] = [];
+  for (const [i, text] of texts.entries()) {
+    const body = {
+      instances: [{ content: text, task_type: taskType }],
+      parameters: { outputDimensionality: config.embedding.dimensions },
+    };
+    const json = (await callVertex(url, body, ERROR_CODES.EMBEDDING_FAILED)) as EmbedResponse;
+    const values = json.predictions?.[0]?.embeddings?.values;
     if (values === undefined || values.length !== config.embedding.dimensions) {
       throw new AppError(ERROR_CODES.EMBEDDING_FAILED, 'Embedding の次元数が想定と異なります', {
         details: { index: i, actual: values?.length, expected: config.embedding.dimensions },
       });
     }
-    return normalize(values);
-  });
+    results.push(normalize(values));
+  }
+  return results;
 }
 
 /** コサイン距離での検索安定性のため、次元削減時は正規化する(Vertex AI の推奨)。 */

@@ -4,7 +4,7 @@ import { AppError, ERROR_CODES } from '@ai-manager/shared';
 /**
  * マイグレーションファイルの命名・順序の純粋ロジック(テスト対象)。
  * - versioned: migrations/NNNN_name.sql … 一度だけ適用。適用後の変更は禁止
- * - repeatable: etl/NN_name.sql        … チェックサム変更時に再適用(ビュー・関数定義)
+ * - repeatable: etl/NN_name.sql        … 毎回適用・冪等(ビュー・関数・GRANT・pg_cron 登録)
  */
 const VERSIONED_PATTERN = /^\d{4}_[a-z0-9_]+\.sql$/;
 const REPEATABLE_PATTERN = /^\d{2}_[a-z0-9_]+\.sql$/;

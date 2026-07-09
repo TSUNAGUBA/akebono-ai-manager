@@ -13,7 +13,9 @@ import { checksum, sortRepeatableFiles, sortVersionedFiles } from './files.js';
 /**
  * マイグレーションランナー。
  * - versioned(migrations/)は一度だけ、ファイル順に適用。各ファイルは1トランザクション
- * - repeatable(etl/)はチェックサム変更時に再適用(ビュー・ETL関数)
+ * - repeatable(etl/)は毎回適用する(ビュー・ETL関数・GRANT・pg_cron 登録。すべて冪等)。
+ *   「後から DB ロールを作成した」「後から pg_cron を有効化した」場合も、
+ *   db-migrate ジョブの再実行だけで反映される(手動回復パスを不要にする)
  * - advisory lock で同時実行を防止(再実行安全)
  * - 適用済み versioned ファイルの変更はエラー(AIM-2004)として検出
  */
@@ -92,16 +94,9 @@ export async function runMigrations(): Promise<void> {
           }
         }
 
-        // ── repeatable ──
-        const repeatableApplied = new Map<string, string>();
-        const repeatableRows = await client.query<{ name: string; checksum: string }>(
-          'SELECT name, checksum FROM public.repeatable_migrations',
-        );
-        for (const row of repeatableRows.rows) repeatableApplied.set(row.name, row.checksum);
-
+        // ── repeatable(毎回適用・冪等)──
         const repeatable = await loadSqlFiles(path.join(packageRoot, 'etl'), sortRepeatableFiles);
         for (const file of repeatable) {
-          if (repeatableApplied.get(file.name) === file.hash) continue;
           logger.info(`repeatable マイグレーションを適用: ${file.name}`);
           try {
             await client.query('BEGIN');

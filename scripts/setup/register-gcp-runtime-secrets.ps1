@@ -50,8 +50,17 @@ function Set-GcpSecret {
     & gcloud secrets create $Name --replication-policy automatic --project $ProjectId | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "シークレット $Name の作成に失敗しました" }
   }
-  $Value | & gcloud secrets versions add $Name --data-file=- --project $ProjectId | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw "シークレット $Name への値の登録に失敗しました" }
+  # パイプ渡しは末尾に改行が付加され、DB_HOST 等が「\r\n 付き」で保存されて
+  # 接続不能になるため、改行なしの一時ファイル経由で登録する
+  $tmp = New-TemporaryFile
+  try {
+    [System.IO.File]::WriteAllText($tmp.FullName, $Value)
+    & gcloud secrets versions add $Name --data-file=$($tmp.FullName) --project $ProjectId | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "シークレット $Name への値の登録に失敗しました" }
+  }
+  finally {
+    Remove-Item $tmp.FullName -Force -ErrorAction SilentlyContinue
+  }
   Write-Host "  登録済み: $Name"
 }
 

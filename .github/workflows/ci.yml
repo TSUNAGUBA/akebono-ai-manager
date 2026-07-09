@@ -1,9 +1,9 @@
 name: CI
 
+# push トリガーは付けない: PR と併用すると同一ブランチで二重実行になる。
+# main への push は deploy.yml の verify ジョブが検証する。
 on:
   pull_request:
-  push:
-    branches-ignore: [main]
 
 permissions:
   contents: read

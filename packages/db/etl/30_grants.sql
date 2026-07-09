@@ -17,13 +17,14 @@ BEGIN
   END IF;
 
   -- dashboard_ro: ダッシュボード用。dwh の参照+ops の必要テーブルのみ参照
-  -- (生の対話ログ ops.dialogues は含めない: 可視化は集計データに限る)
+  -- (生の対話ログ ops.dialogues は含めない: 対話系は集計ビュー v_dialogue_daily_stats のみ)
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'dashboard_ro') THEN
     GRANT USAGE ON SCHEMA dwh, ops TO dashboard_ro;
     GRANT SELECT ON ALL TABLES IN SCHEMA dwh TO dashboard_ro;
     ALTER DEFAULT PRIVILEGES IN SCHEMA dwh GRANT SELECT ON TABLES TO dashboard_ro;
     GRANT SELECT ON ops.users, ops.customers, ops.projects, ops.tasks,
-                    ops.task_status_log, ops.suggestions, ops.escalations, ops.reports
+                    ops.task_status_log, ops.suggestions, ops.escalations, ops.reports,
+                    ops.v_dialogue_daily_stats
       TO dashboard_ro;
   END IF;
 END

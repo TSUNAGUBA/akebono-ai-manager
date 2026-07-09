@@ -145,7 +145,9 @@ DECLARE
   v_name  TEXT;
   i       INT;
 BEGIN
-  FOR i IN 0..p_months_ahead LOOP
+  -- i = -1(前月)から作成する: JST と UTC の月が異なる月初 00:00〜09:00 JST に
+  -- 初回実行しても、直前の UTC 月のパーティションが欠けないようにするため
+  FOR i IN -1..p_months_ahead LOOP
     v_start := date_trunc('month', (now() AT TIME ZONE 'Asia/Tokyo')::date) + make_interval(months => i);
     v_end   := v_start + INTERVAL '1 month';
     v_name  := 'dialogues_' || to_char(v_start, 'YYYYMM');

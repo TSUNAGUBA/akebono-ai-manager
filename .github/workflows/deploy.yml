@@ -202,11 +202,12 @@ jobs:
           if [ -n "$GCP_VPC_CONNECTOR" ]; then
             VPC_FLAGS=(--vpc-connector "$GCP_VPC_CONNECTOR" --vpc-egress all-traffic)
           fi
-          ENV_VARS="GCP_PROJECT_ID=${GCP_PROJECT_ID},GCP_REGION=${GCP_REGION},AUTH_MODE=${DASHBOARD_AUTH_MODE:-iap}"
+          ENV_VARS="GCP_PROJECT_ID=${GCP_PROJECT_ID},GCP_REGION=${GCP_REGION},AUTH_MODE=${DASHBOARD_AUTH_MODE:-iap},DB_POOL_MAX=5"
           if [ -n "$DASHBOARD_IAP_AUDIENCE" ]; then
             ENV_VARS="${ENV_VARS},IAP_AUDIENCE=${DASHBOARD_IAP_AUDIENCE}"
           fi
-          # 認証はアプリ層(IAP JWT 検証)で担保。IAP を LB 経由で構成する(docs 参照)
+          # 認証はアプリ層(IAP JWT 検証)+ingress 制限の多層防御:
+          # LB(IAP)経由のみ許可し、*.run.app への直接アクセスをネットワーク層で遮断する
           gcloud run deploy ai-manager-dashboard \
             --project "$GCP_PROJECT_ID" \
             --region "$GCP_REGION" \
@@ -215,11 +216,12 @@ jobs:
             --args packages/dashboard/dist/index.js \
             --service-account "$GCP_RUNTIME_SERVICE_ACCOUNT" \
             --allow-unauthenticated \
+            --ingress internal-and-cloud-load-balancing \
             --set-env-vars "$ENV_VARS" \
             --set-secrets "DB_HOST=ai-manager-db-host:latest,DB_NAME=ai-manager-db-name:latest,DB_USER=ai-manager-db-dashboard-user:latest,DB_PASSWORD=ai-manager-db-dashboard-password:latest" \
             --min-instances 0 \
             --max-instances 2 \
-            --concurrency 40 \
+            --concurrency 20 \
             --memory 512Mi \
             --timeout 60 \
             "${VPC_FLAGS[@]}"

@@ -24,17 +24,15 @@ export async function renderOverview(pool: pg.Pool): Promise<Raw> {
   );
   const stats = taskStats.rows[0];
 
+  // dashboard_ro は生の対話ログを参照できないため、集計専用ビュー経由で取得する
   const checkin = await query<{ members: string; answered: string }>(
     pool,
     `SELECT
        (SELECT count(*) FROM ops.users WHERE active AND role = 'member') AS members,
-       count(DISTINCT d.user_id) AS answered
-     FROM ops.dialogues d
-     JOIN ops.users u ON u.user_id = d.user_id AND u.role = 'member'
-     WHERE d.dialogue_type = 'morning_checkin'
-       AND d.hypothesis IS NOT NULL
-       AND d.created_at >= ($1::date::timestamp AT TIME ZONE 'Asia/Tokyo')
-       AND d.created_at <  (($1::date + 1)::timestamp AT TIME ZONE 'Asia/Tokyo')`,
+       count(*) FILTER (WHERE s.checkin_answered) AS answered
+     FROM ops.v_dialogue_daily_stats s
+     JOIN ops.users u ON u.user_id = s.user_id AND u.role = 'member' AND u.active
+     WHERE s.jst_date = $1::date`,
     [today],
   );
   const members = Number(checkin.rows[0]?.members ?? 0);

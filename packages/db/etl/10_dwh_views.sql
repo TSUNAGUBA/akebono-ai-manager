@@ -1,5 +1,7 @@
--- 主要KPIビュー(要件 7.3)。repeatable マイグレーション: 内容変更で再適用される。
--- BI 閲覧用ロール(bi_ro)にはこれらのビューのみ GRANT する(管理者限定ビューは admin_ro)。
+-- 主要KPIビュー(要件 7.3)。repeatable マイグレーション: 毎回適用(冪等)。
+-- 参照権限: dashboard_ro に dwh スキーマの SELECT を付与(30_grants.sql)。
+-- 「管理者限定」の制御はダッシュボードのアプリ層(requireAdmin)で行う
+-- (docs/architecture/phase1-implementation.md §4)。BI ツール併用時は bi_ro を別途追加する。
 
 -- 管理者限定: メンバー成長観察(仮説表明率、AI補助率、gap分布、next_change言語化率)
 CREATE OR REPLACE VIEW dwh.v_member_growth AS
@@ -70,21 +72,25 @@ JOIN dwh.dim_user du ON du.user_key = fas.user_key
 GROUP BY du.user_id, du.display_name, fas.category;
 
 -- 全員: プロジェクト別ヘルス(lead_time、blocked率)
+-- SCD Type 2 でプロジェクト属性が変わっても行が分裂しないよう、
+-- ファクトは全バージョンの dim 経由で拾い、表示属性は現行バージョンに集約する
 CREATE OR REPLACE VIEW dwh.v_project_health AS
 SELECT
-  dp.project_id,
-  dp.project_name,
-  dp.customer_name,
-  dp.industry,
-  dp.status,
+  cur.project_id,
+  cur.project_name,
+  cur.customer_name,
+  cur.industry,
+  cur.status,
   count(*) AS activities,
   count(DISTINCT fta.task_id) AS tasks_touched,
   count(*) FILTER (WHERE fta.status_to = 'done') AS tasks_completed,
   round(avg(fta.lead_time_hours) FILTER (WHERE fta.status_to = 'done'), 1) AS avg_lead_time_hours,
   round(avg(CASE WHEN fta.was_blocked THEN 1 ELSE 0 END)::numeric, 3) AS blocked_rate
 FROM dwh.fact_task_activity fta
-JOIN dwh.dim_project dp ON dp.project_key = fta.project_key
-GROUP BY dp.project_id, dp.project_name, dp.customer_name, dp.industry, dp.status;
+JOIN dwh.dim_project dpv ON dpv.project_key = fta.project_key
+JOIN dwh.dim_project cur
+  ON cur.project_id = dpv.project_id AND cur.valid_to = DATE '9999-12-31'
+GROUP BY cur.project_id, cur.project_name, cur.customer_name, cur.industry, cur.status;
 
 -- 管理者限定: AI コスト(日次・ユーザー別・モデル別)
 CREATE OR REPLACE VIEW dwh.v_ai_cost AS

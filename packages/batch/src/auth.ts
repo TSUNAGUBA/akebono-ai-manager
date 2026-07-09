@@ -1,6 +1,6 @@
 import type http from 'node:http';
 import { OAuth2Client } from 'google-auth-library';
-import { AppError, ERROR_CODES, optionalEnv } from '@ai-manager/shared';
+import { AppError, ERROR_CODES, optionalEnv, requireEnv } from '@ai-manager/shared';
 
 /**
  * Cloud Scheduler からの OIDC トークン検証。
@@ -9,7 +9,9 @@ import { AppError, ERROR_CODES, optionalEnv } from '@ai-manager/shared';
  *
  * - トークンの audience は Cloud Run のサービス URL(Host ヘッダーから導出)
  * - 発行者は accounts.google.com
- * - email クレームが BATCH_INVOKER_SA(Scheduler が用いる SA)と一致すること
+ * - email クレームが BATCH_INVOKER_SA(Scheduler が用いる SA)と一致すること。
+ *   Host 由来の audience は攻撃者も一致させられるため、呼び出し元 SA の照合を
+ *   フェイルクローズ(未設定なら拒否)の必須チェックとする
  */
 const oauthClient = new OAuth2Client();
 
@@ -39,8 +41,8 @@ export async function verifySchedulerRequest(req: http.IncomingMessage): Promise
     });
   }
 
-  const expectedInvoker = optionalEnv('BATCH_INVOKER_SA', '');
-  if (expectedInvoker !== '' && email !== expectedInvoker) {
+  const expectedInvoker = requireEnv('BATCH_INVOKER_SA');
+  if (email !== expectedInvoker) {
     throw new AppError(ERROR_CODES.AUTH_FORBIDDEN, '許可されていない呼び出し元です', {
       status: 403,
       details: { email: email ?? '(なし)' },

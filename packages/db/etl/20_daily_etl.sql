@@ -126,15 +126,19 @@ BEGIN
   WHERE (d.created_at AT TIME ZONE 'Asia/Tokyo')::date = v_target;
 
   -- ── fact_hypothesis_outcome(仮説→結果の突合)────────
-  -- 朝の仮説と、同一対話の review または同日の completion_review を突合する
+  -- 朝の仮説と、同一対話の review またはそれ以降の completion_review を突合する。
+  -- 振り返りが翌日以降に完了するケースを取り込むため、仮説表明日で直近7日を洗い替える
+  -- (date_key は仮説表明日。days_to_outcome = 振り返り日 - 仮説表明日)。
+  -- 7日を超えて完了した振り返りは突合対象外(運用上は同日〜数日内が前提)。
 
-  DELETE FROM dwh.fact_hypothesis_outcome WHERE date_key = v_date_key;
+  DELETE FROM dwh.fact_hypothesis_outcome
+  WHERE date_key BETWEEN v_lookback_key AND v_date_key;
 
   INSERT INTO dwh.fact_hypothesis_outcome
     (date_key, user_key, project_key, task_id, hypothesis_text, outcome_text,
      gap_category, next_change_stated, days_to_outcome)
   SELECT
-    v_date_key,
+    to_char((m.created_at AT TIME ZONE 'Asia/Tokyo')::date, 'YYYYMMDD')::int,
     du.user_key,
     dp.project_key,
     m.task_id,
@@ -146,17 +150,16 @@ BEGIN
     CASE WHEN r.review ->> 'gap_category' IN ('none','minor','major','opposite')
          THEN r.review ->> 'gap_category' END,
     NULLIF(trim(r.review ->> 'next_change'), '') IS NOT NULL,
-    GREATEST(
-      (r.created_at AT TIME ZONE 'Asia/Tokyo')::date
-        - (m.created_at AT TIME ZONE 'Asia/Tokyo')::date,
-      0)
+    (r.created_at AT TIME ZONE 'Asia/Tokyo')::date
+      - (m.created_at AT TIME ZONE 'Asia/Tokyo')::date
   FROM ops.dialogues m
   JOIN LATERAL (
     SELECT d2.review, d2.created_at
     FROM ops.dialogues d2
     WHERE d2.user_id = m.user_id
       AND d2.review IS NOT NULL
-      AND (d2.created_at AT TIME ZONE 'Asia/Tokyo')::date = v_target
+      AND d2.created_at >= m.created_at
+      AND (d2.created_at AT TIME ZONE 'Asia/Tokyo')::date <= v_target
       AND ((d2.dialogue_id = m.dialogue_id AND d2.created_at = m.created_at)
            OR d2.dialogue_type = 'completion_review')
       AND (m.task_id IS NULL OR d2.task_id IS NULL OR d2.task_id = m.task_id)
@@ -167,7 +170,7 @@ BEGIN
   LEFT JOIN dwh.dim_project dp ON dp.project_id = m.project_id AND dp.valid_to = DATE '9999-12-31'
   WHERE m.dialogue_type = 'morning_checkin'
     AND m.hypothesis IS NOT NULL
-    AND (m.created_at AT TIME ZONE 'Asia/Tokyo')::date = v_target;
+    AND (m.created_at AT TIME ZONE 'Asia/Tokyo')::date BETWEEN v_lookback AND v_target;
 
   -- ── fact_ai_suggestion(採否は後日確定しうるため直近7日を洗い替え)──
 
