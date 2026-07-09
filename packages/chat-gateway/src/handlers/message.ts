@@ -37,6 +37,11 @@ import {
   findAwaitingReason,
 } from '../services/suggestions.js';
 import { formatKnowledgeContext, searchAnalogies, searchKnowledge } from '../services/rag.js';
+import {
+  identifyTargetCustomer,
+  resolveKnowledgeScope,
+  scopeFallbackMode,
+} from '../services/knowledge-scope.js';
 
 const MAX_CONTEXT_TURNS = 12;
 
@@ -198,10 +203,21 @@ async function answerAdhocQuestion(
   const category = classifyMessage(text);
   const tier = tierForCategory(category);
 
+  // ナレッジスコープ(要件 v0.3 §4): 対象顧客を特定できたら 1 ホップの到達可能集合で絞り、
+  // 特定できなければ既定で顧客固有を除外する(誤混入防止)。例え話は共通ナレッジのため対象外
+  const targetCustomerId = await identifyTargetCustomer(pool, text);
+  const scope =
+    targetCustomerId !== undefined
+      ? await resolveKnowledgeScope(pool, targetCustomerId)
+      : scopeFallbackMode() === 'all'
+        ? undefined
+        : ('exclude-customer' as const);
+
   const [chunks, analogies] = await Promise.all([
     searchKnowledge(pool, text, {
       docTypes: ['customer_profile', 'glossary', 'domain_ops', 'decision_rules'],
       limit: 5,
+      scope,
     }),
     /例え|たとえ/.test(text) ? searchAnalogies(pool, text) : Promise.resolve([]),
   ]);

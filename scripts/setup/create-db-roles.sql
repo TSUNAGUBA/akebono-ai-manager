@@ -4,6 +4,7 @@
 --   psql "host=<RDS_HOST> dbname=ai_manager user=<ADMIN_USER> sslmode=require" \
 --     -v app_rw_password='<強いパスワード>' \
 --     -v dashboard_ro_password='<強いパスワード>' \
+--     -v admin_rw_password='<強いパスワード>' \
 --     -f create-db-roles.sql
 --
 -- 権限の付与(GRANT)自体はマイグレーション(packages/db/etl/30_grants.sql)が
@@ -20,5 +21,10 @@ SELECT format('CREATE ROLE ai_manager_dashboard_ro LOGIN PASSWORD %L', :'dashboa
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ai_manager_dashboard_ro')
 \gexec
 
+-- マスタ管理用(v0.3): ダッシュボードの管理者限定ページからのみ使用。マスタ表+顧客のみ書込可
+SELECT format('CREATE ROLE ai_manager_admin_rw LOGIN PASSWORD %L', :'admin_rw_password')
+WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ai_manager_admin_rw')
+\gexec
+
 -- 接続権限
-GRANT CONNECT ON DATABASE ai_manager TO ai_manager_app_rw, ai_manager_dashboard_ro;
+GRANT CONNECT ON DATABASE ai_manager TO ai_manager_app_rw, ai_manager_dashboard_ro, ai_manager_admin_rw;

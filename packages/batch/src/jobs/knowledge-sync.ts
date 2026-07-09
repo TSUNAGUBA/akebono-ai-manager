@@ -29,6 +29,18 @@ export async function runKnowledgeSync(pool: pg.Pool): Promise<JobSummary> {
   // 取得に失敗したファイルのチャンクを誤って消さないよう、列挙時点で確定する。
   const seenDocIds = files.map((f) => f.id);
 
+  // フォルダ規約のマスタ突合用(v0.3 §3.4)。1 回のロードで全ファイルを検証する
+  const knownIndustries = new Set(
+    (await query<{ industry_id: string }>(pool, 'SELECT industry_id FROM ops.industries')).rows.map(
+      (r) => r.industry_id,
+    ),
+  );
+  const knownCustomers = new Set(
+    (await query<{ customer_id: string }>(pool, 'SELECT customer_id FROM ops.customers')).rows.map(
+      (r) => r.customer_id,
+    ),
+  );
+
   for (const file of files) {
     try {
       const text = await fetchFileText(file);
@@ -37,7 +49,29 @@ export async function runKnowledgeSync(pool: pg.Pool): Promise<JobSummary> {
         continue;
       }
 
-      const { docType, customerId } = classifyDocument(file);
+      const classified = classifyDocument(file);
+      const { docType, customerId } = classified;
+      // 業界がマスタに無い場合は NULL で取り込み+警告(取り込みは止めない: v0.3 §3.4)
+      let industryId = classified.industryId;
+      if (industryId !== null && !knownIndustries.has(industryId)) {
+        logger.warn('フォルダ規約の業界がマスタに存在しません(industry_id なしで取り込み)', {
+          docId: file.id,
+          name: file.name,
+          path: file.path,
+          industryId,
+          hint: 'ダッシュボードの業界マスタに追加するか、domain/ 配下のフォルダ名を合わせてください',
+        });
+        industryId = null;
+      }
+      if (customerId !== null && !knownCustomers.has(customerId)) {
+        logger.warn('フォルダ規約の顧客IDがマスタに存在しません(取り込みは継続)', {
+          docId: file.id,
+          name: file.name,
+          path: file.path,
+          customerId,
+          hint: '顧客マスタの customer_id とフォルダ名を一致させると顧客スコープ検索が有効になります',
+        });
+      }
       const chunks = chunkDocument(text);
 
       const existing = await query<{ chunk_index: number; content_hash: string }>(
@@ -59,11 +93,12 @@ export async function runKnowledgeSync(pool: pg.Pool): Promise<JobSummary> {
           await query(
             pool,
             `INSERT INTO rag.knowledge_chunks
-               (doc_id, doc_type, customer_id, title, chunk_index, chunk_text, embedding, content_hash, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7::vector, $8, now())
+               (doc_id, doc_type, customer_id, industry_id, title, chunk_index, chunk_text, embedding, content_hash, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8::vector, $9, now())
              ON CONFLICT (doc_id, chunk_index) DO UPDATE SET
                doc_type = EXCLUDED.doc_type,
                customer_id = EXCLUDED.customer_id,
+               industry_id = EXCLUDED.industry_id,
                title = EXCLUDED.title,
                chunk_text = EXCLUDED.chunk_text,
                embedding = EXCLUDED.embedding,
@@ -73,6 +108,7 @@ export async function runKnowledgeSync(pool: pg.Pool): Promise<JobSummary> {
               file.id,
               docType,
               customerId,
+              industryId,
               file.name,
               chunk.index,
               chunk.text,
@@ -82,6 +118,19 @@ export async function runKnowledgeSync(pool: pg.Pool): Promise<JobSummary> {
           );
         }
       }
+
+      // 本文が変わらなくても分類(業界・顧客・doc_type)は追従させる(v0.3 §6-3。
+      // 既存チャンクへの industry_id 付与はこの経路で行われ、embedding は再計算しない)
+      await query(
+        pool,
+        `UPDATE rag.knowledge_chunks
+            SET doc_type = $2, customer_id = $3, industry_id = $4, updated_at = now()
+          WHERE doc_id = $1
+            AND (doc_type IS DISTINCT FROM $2
+                 OR customer_id IS DISTINCT FROM $3
+                 OR industry_id IS DISTINCT FROM $4)`,
+        [file.id, docType, customerId, industryId],
+      );
 
       // 文書が短くなった場合の余剰チャンクを削除
       await query(
