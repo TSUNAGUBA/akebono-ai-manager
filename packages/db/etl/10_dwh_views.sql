@@ -1,5 +1,5 @@
 -- 主要KPIビュー(要件 7.3)。repeatable マイグレーション: 毎回適用(冪等)。
--- 参照権限: dashboard_ro に dwh スキーマの SELECT を付与(30_grants.sql)。
+-- 参照権限: ai_manager_dashboard_ro に dwh スキーマの SELECT を付与(30_grants.sql)。
 -- 「管理者限定」の制御はダッシュボードのアプリ層(requireAdmin)で行う
 -- (docs/architecture/phase1-implementation.md §4)。BI ツール併用時は bi_ro を別途追加する。
 

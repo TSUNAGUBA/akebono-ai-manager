@@ -3,7 +3,7 @@
   "GCP_PROJECT_ID": "my-gcp-project",
   "GCP_PROJECT_NUMBER": "123456789012",
   "GCP_REGION": "asia-northeast1",
-  "GCP_WORKLOAD_IDENTITY_PROVIDER": "projects/123456789012/locations/global/workloadIdentityPools/github-pool/providers/github-provider",
+  "GCP_WORKLOAD_IDENTITY_PROVIDER": "projects/123456789012/locations/global/workloadIdentityPools/ai-manager-github-pool/providers/ai-manager-github-provider",
   "GCP_DEPLOY_SERVICE_ACCOUNT": "ai-manager-deployer@my-gcp-project.iam.gserviceaccount.com",
   "GCP_RUNTIME_SERVICE_ACCOUNT": "ai-manager-runtime@my-gcp-project.iam.gserviceaccount.com",
   "GCP_ARTIFACT_REPOSITORY": "ai-manager",

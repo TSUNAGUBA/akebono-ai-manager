@@ -52,4 +52,4 @@
 
 | コード | 意味 | 主な対処 |
 |---|---|---|
-| AIM-6001 | ダッシュボードのクエリ失敗 | dwh スキーマの ETL 実行状況、dashboard_ro の GRANT を確認 |
+| AIM-6001 | ダッシュボードのクエリ失敗 | dwh スキーマの ETL 実行状況、ai_manager_dashboard_ro の GRANT を確認 |

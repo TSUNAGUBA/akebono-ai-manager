@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   ランタイム用の秘匿情報(RDS 接続情報)を GCP Secret Manager に登録する。
 
@@ -7,8 +7,8 @@
   以下のシークレットを作成し、値を新しいバージョンとして登録する(冪等):
     ai-manager-db-host               … RDS エンドポイント
     ai-manager-db-name               … データベース名(既定 ai_manager)
-    ai-manager-db-app-user/password       … アプリ用(app_rw)
-    ai-manager-db-dashboard-user/password … ダッシュボード用(dashboard_ro)
+    ai-manager-db-app-user/password       … アプリ用(ai_manager_app_rw)
+    ai-manager-db-dashboard-user/password … ダッシュボード用(ai_manager_dashboard_ro)
     ai-manager-db-admin-user/password     … マイグレーション用(管理ユーザー)
   DB ロールの作成は scripts/setup/create-db-roles.sql を参照。
 
@@ -20,8 +20,8 @@ param(
   [Parameter(Mandatory = $true)][string]$ProjectId,
   [string]$DbHost,
   [string]$DbName = 'ai_manager',
-  [string]$AppUser = 'app_rw',
-  [string]$DashboardUser = 'dashboard_ro',
+  [string]$AppUser = 'ai_manager_app_rw',
+  [string]$DashboardUser = 'ai_manager_dashboard_ro',
   [string]$AdminUser
 )
 

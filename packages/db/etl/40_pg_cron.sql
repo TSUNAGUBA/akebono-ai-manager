@@ -3,6 +3,8 @@
 --       cron.database_name が本 DB(ai_manager)に設定されていること。
 -- 拡張を作成できない環境ではスキップして通知のみ出す(非ブロッキング)。
 -- pg_cron を後から有効化した場合は、db-migrate ジョブの再実行で自動登録される。
+-- 共有 RDS インスタンスで pg_cron が既に別 DB に割り当てられている場合はここでは登録できないため、
+-- その DB 側から cron.schedule_in_database で登録する(docs/operations/deployment-setup.md の手動フォールバック)。
 
 DO $do$
 BEGIN
