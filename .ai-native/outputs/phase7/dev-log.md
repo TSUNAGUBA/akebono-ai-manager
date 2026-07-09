@@ -42,6 +42,6 @@ ADR-1〜5 を docs/architecture/phase1-implementation.md に記録
 | `/healthz` が Google の 404 を返す | Cloud Run フロントエンドの予約パス(コンテナ未到達) | ヘルスチェックパスを `/health` に変更(PR #3) |
 | Chat からの呼び出しが 401 | Workspace アドオン基盤経由の新方式トークン(呼び出し元 `gcp-sa-gsuiteaddons`)未対応 | 新旧両方式のトークン検証に対応(PR #3) |
 | Chat に応答が表示されない | 新方式は `hostAppDataAction` ラップ形式の応答が必須 | イベント正規化+応答ラップを実装(PR #4) |
-| AIM-4001: Vertex AI HTTP 404(`gemini-2.5-flash-lite` not found) | モデルごとに提供ロケーションが異なり、gemini-2.5-flash-lite はグローバルエンドポイント限定。asia-northeast1 リージョナルに投げていた | 生成系は既定 global エンドポイント、embedding は既定リージョナルに分離(ADR-8)。`VERTEX_LOCATION` / `VERTEX_EMBEDDING_LOCATION` / `MODEL_*` を secrets 経由で運用変更可能に配線 |
+| AIM-4001: Vertex AI HTTP 404(`gemini-2.5-flash-lite` not found) | モデルごとに提供ロケーションが異なり、gemini-2.5-flash-lite は asia-northeast1 リージョナルでは未提供(グローバルエンドポイントでは提供)だった | 生成系は既定 global エンドポイント、embedding は既定リージョナルに分離(ADR-8)。`VERTEX_LOCATION` / `VERTEX_EMBEDDING_LOCATION` / `MODEL_*` を secrets 経由で運用変更可能に配線 |
 
-Gemini 2.5 系は 2026-10-16 廃止予定。後継移行は `MODEL_*` secrets の変更+再デプロイのみで完了する(コード変更不要)。
+Gemini 2.5 系は 2026-10-16 廃止予定。後継移行は `MODEL_*` secrets の変更+再デプロイのみで完了する(コード変更不要)。単価表の追従は `MODEL_PRICING_JSON` secret(配線済み)で行う。

@@ -206,6 +206,31 @@ $config = [ordered]@{
   MODEL_FLASH_LITE               = ''
   MODEL_FLASH                    = ''
   MODEL_PRO                      = ''
+  MODEL_PRICING_JSON             = ''
+  EMBEDDING_MODEL                = ''
+}
+
+# 再実行時、オペレーターが記入済みの任意項目を巻き戻さない(既存ファイルの値を優先してマージ)。
+# 必須項目(GCP_* のリソース名)は常に最新の実値で再計算する。
+$operatorEditableKeys = @(
+  'GCP_VPC_CONNECTOR', 'ADMIN_SPACE_ID', 'KNOWLEDGE_DRIVE_FOLDER_ID',
+  'DASHBOARD_AUTH_MODE', 'DASHBOARD_IAP_AUDIENCE',
+  'VERTEX_LOCATION', 'VERTEX_EMBEDDING_LOCATION',
+  'MODEL_FLASH_LITE', 'MODEL_FLASH', 'MODEL_PRO', 'MODEL_PRICING_JSON', 'EMBEDDING_MODEL'
+)
+if (Test-Path $OutputConfigPath) {
+  try {
+    $existing = Get-Content -Path $OutputConfigPath -Raw | ConvertFrom-Json
+    foreach ($key in $operatorEditableKeys) {
+      $prior = $existing.$key
+      if (-not [string]::IsNullOrWhiteSpace([string]$prior)) {
+        $config[$key] = [string]$prior
+      }
+    }
+    Write-Host "既存の $OutputConfigPath の任意項目を引き継ぎました" -ForegroundColor DarkGray
+  } catch {
+    Write-Warning "既存の $OutputConfigPath を読み取れなかったため新規作成します: $_"
+  }
 }
 $config | ConvertTo-Json | Set-Content -Path $OutputConfigPath -Encoding utf8
 

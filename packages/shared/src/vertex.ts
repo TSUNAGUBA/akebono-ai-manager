@@ -37,7 +37,8 @@ export interface GenerateResult {
  * Vertex AI の呼び出し URL を組み立てる。
  * location='global' はグローバルエンドポイント(ホスト名にリージョンプレフィックスなし)。
  * モデルごとに提供ロケーションが異なり、未提供のロケーションに投げると HTTP 404 になる
- * (例: gemini-2.5-flash-lite はグローバル限定、gemini-embedding-001 はリージョナル提供あり)。
+ * (例: gemini-2.5-flash-lite は asia-northeast1 未提供でグローバルでは提供、
+ *  gemini-embedding-001 はリージョナル提供あり)。
  */
 export function vertexEndpointUrl(
   location: string,
@@ -90,9 +91,21 @@ function pricingTable(): Record<string, { input: number; output: number }> {
   return pricingCache;
 }
 
+const unknownPricingWarned = new Set<string>();
+
 export function estimateCostUsd(model: string, inputTokens: number, outputTokens: number): number {
   const price = pricingTable()[model];
-  if (price === undefined) return 0;
+  if (price === undefined) {
+    // モデル差し替え時に v_ai_cost のコスト監視が無警告で 0 になるのを防ぐ(モデルごとに一度だけ警告)
+    if (!unknownPricingWarned.has(model)) {
+      unknownPricingWarned.add(model);
+      logger.warn('モデル単価が未登録のため概算コストを 0 として記録します', {
+        model,
+        hint: 'MODEL_PRICING_JSON に {"モデル名":{"input":X,"output":Y}} を登録してください',
+      });
+    }
+    return 0;
+  }
   return (inputTokens * price.input + outputTokens * price.output) / 1_000_000;
 }
 

@@ -67,4 +67,14 @@ describe('loadVertexConfig', () => {
     expect(resolveModel('flash', config)).toBe('gemini-2.5-flash');
     expect(resolveModel('pro', config)).toBe('gemini-2.5-pro');
   });
+
+  it('前後空白は除去し、空白のみの値は既定値扱いにする(URL 破壊の防止)', () => {
+    process.env['VERTEX_LOCATION'] = ' global ';
+    process.env['VERTEX_EMBEDDING_LOCATION'] = '   ';
+    process.env['MODEL_FLASH_LITE'] = ' gemini-3.1-flash-lite ';
+    const config = loadVertexConfig();
+    expect(config.location).toBe('global');
+    expect(config.embeddingLocation).toBe('asia-northeast1');
+    expect(resolveModel('flash-lite', config)).toBe('gemini-3.1-flash-lite');
+  });
 });

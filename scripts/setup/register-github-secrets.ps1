@@ -41,7 +41,9 @@ $optionalKeys = @(
   'VERTEX_EMBEDDING_LOCATION',
   'MODEL_FLASH_LITE',
   'MODEL_FLASH',
-  'MODEL_PRO'
+  'MODEL_PRO',
+  'MODEL_PRICING_JSON',
+  'EMBEDDING_MODEL'
 )
 
 if (-not (Test-Path $ConfigPath)) {

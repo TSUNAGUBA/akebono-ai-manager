@@ -136,15 +136,18 @@ sequenceDiagram
   (`aiplatform.googleapis.com` / `locations/global`)を呼ぶ。embedding(gemini-embedding-001)は
   既定で `GCP_REGION`(asia-northeast1)のリージョナルエンドポイントを呼ぶ。
   いずれも `VERTEX_LOCATION` / `VERTEX_EMBEDDING_LOCATION` で上書き可能
-- **理由**: モデルごとに提供ロケーションが異なり、`gemini-2.5-flash-lite` はグローバル限定提供のため
-  リージョナルに投げると HTTP 404(AIM-4001)になる(本番で実際に発生)。グローバルは可用性も高い。
-  gemini-embedding-001 は asia-northeast1 提供があるため、データを国内に留められるリージョナルを維持する
+- **理由**: モデルごとに提供ロケーションが異なり、`gemini-2.5-flash-lite` は asia-northeast1 では未提供
+  (グローバルエンドポイントでは提供)のため、リージョナルに投げると HTTP 404(AIM-4001)になる(本番で実際に発生)。
+  グローバルは可用性も高い。gemini-embedding-001 は asia-northeast1 提供があるため、データを国内に留められるリージョナルを維持する
 - **トレードオフ**: グローバルエンドポイントは処理リージョンを保証しない(データレジデンシー非対応)。
   対話テキストの生成処理が国外リージョンで実行されうるが、保存先(RDS)は国内であり Phase 1 の要件に抵触しない。
-  レジデンシー要件が生じた場合は `VERTEX_LOCATION` にリージョンを指定し、そのリージョンで提供中のモデルを `MODEL_*` で選ぶ
+  レジデンシー要件が生じた場合は `VERTEX_LOCATION` にリージョンを指定し、そのリージョンで提供中のモデルを `MODEL_*` で選ぶ。
+  処理リージョンが変動するためレイテンシも変動しうる(ダッシュボードの応答時間監視で傾向を把握する)。
+  将来 VPC Service Controls の境界を導入する場合、グローバルエンドポイントには制約があるため本 ADR を再評価すること
 - **備考**: Gemini 2.5 系は 2026-10-16 廃止予定。モデル名は `MODEL_FLASH_LITE` / `MODEL_FLASH` / `MODEL_PRO`
   (repository secrets)で差し替えられるため、後継移行はコード変更なしで完了する。
-  単価表(`shared/vertex.ts`)は `MODEL_PRICING_JSON` で追従させる
+  単価表(`shared/vertex.ts`)は `MODEL_PRICING_JSON`(同じく secrets 配線済み)で追従させる。
+  未登録モデルはコスト 0 で記録され、起動後の初回呼び出しで警告ログが出る
 
 ## 6. 未決事項(要件 §13)への Phase 1 時点の回答
 
