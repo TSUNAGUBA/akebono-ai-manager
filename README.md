@@ -7,7 +7,7 @@
 いつものチャットに返事をするだけで、日報が自動で完成し、業務知識が即座に手に入り、
 「予想 → 実行 → 振り返り」の思考サイクルが無理なく回り始めます。
 
-- 📘 要件・基本設計: [docs/refference/ai-manager-requirements-design.md](docs/refference/ai-manager-requirements-design.md)
+- 📘 要件・基本設計: [docs/refference/ai-manager-requirements-design.md](docs/refference/ai-manager-requirements-design.md)(v0.2)+ [v0.3 追補(マスタ管理とナレッジスコープ)](docs/refference/ai-manager-requirements-v0.3-addendum.md)
 - 📗 導入前後の変化(非エンジニア向け): [docs/refference/ai-manager-before-after-guide.md](docs/refference/ai-manager-before-after-guide.md)
 - 📙 Phase 1 実装設計・ADR: [docs/architecture/phase1-implementation.md](docs/architecture/phase1-implementation.md)
 - 🚀 デプロイ設定手順: [docs/operations/deployment-setup.md](docs/operations/deployment-setup.md)
