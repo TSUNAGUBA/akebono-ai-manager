@@ -44,7 +44,9 @@ $optionalKeys = @(
   'MODEL_FLASH',
   'MODEL_PRO',
   'MODEL_PRICING_JSON',
-  'EMBEDDING_MODEL'
+  'EMBEDDING_MODEL',
+  'CALENDAR_ENABLED',
+  'DASHBOARD_ADMIN_DB_ENABLED'
 )
 
 if (-not (Test-Path $ConfigPath)) {
