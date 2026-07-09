@@ -45,7 +45,15 @@ function Read-SecretValue {
 
 function Set-GcpSecret {
   param([string]$Name, [string]$Value)
-  & gcloud secrets describe $Name --project $ProjectId *> $null
+  # PS 5.1 では native コマンドの stderr リダイレクトが EAP='Stop' で致命的エラーになるため一時緩和
+  # (未作成シークレットの describe は stderr に NOT_FOUND を出すのが正常系)
+  $previousEap = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    & gcloud secrets describe $Name --project $ProjectId *> $null
+  } finally {
+    $ErrorActionPreference = $previousEap
+  }
   if ($LASTEXITCODE -ne 0) {
     & gcloud secrets create $Name --replication-policy automatic --project $ProjectId | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "シークレット $Name の作成に失敗しました" }

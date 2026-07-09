@@ -46,7 +46,16 @@ function Invoke-Gcloud {
 
 function Test-GcloudResource {
   param([string[]]$DescribeArguments)
-  & gcloud @DescribeArguments *> $null
+  # Windows PowerShell 5.1 では native コマンドの stderr をリダイレクトすると
+  # $ErrorActionPreference='Stop' の下で致命的エラーになるため、一時的に緩和する
+  # (存在しないリソースの describe は stderr に NOT_FOUND を出すのが正常系)
+  $previousEap = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    & gcloud @DescribeArguments *> $null
+  } finally {
+    $ErrorActionPreference = $previousEap
+  }
   return ($LASTEXITCODE -eq 0)
 }
 
@@ -101,8 +110,14 @@ foreach ($sa in @(
 }
 
 Write-Host "== 4/5 IAM ロール ==" -ForegroundColor Cyan
-# デプロイ SA: Cloud Run 管理・イメージ push・Scheduler 管理(最小権限の原則)
-$deployerRoles = @('roles/run.admin', 'roles/artifactregistry.writer', 'roles/cloudscheduler.admin')
+# デプロイ SA: Cloud Run 管理・イメージ push・Scheduler 管理・VPC コネクタ利用(最小権限の原則)
+# vpcaccess.user は --vpc-connector 付きデプロイ(deploy.yml)に必要
+$deployerRoles = @(
+  'roles/run.admin',
+  'roles/artifactregistry.writer',
+  'roles/cloudscheduler.admin',
+  'roles/vpcaccess.user'
+)
 foreach ($role in $deployerRoles) {
   Invoke-Gcloud @(
     'projects', 'add-iam-policy-binding', $ProjectId,
