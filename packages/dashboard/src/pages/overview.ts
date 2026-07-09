@@ -24,7 +24,7 @@ export async function renderOverview(pool: pg.Pool): Promise<Raw> {
   );
   const stats = taskStats.rows[0];
 
-  // dashboard_ro は生の対話ログを参照できないため、集計専用ビュー経由で取得する
+  // ai_manager_dashboard_ro は生の対話ログを参照できないため、集計専用ビュー経由で取得する
   const checkin = await query<{ members: string; answered: string }>(
     pool,
     `SELECT

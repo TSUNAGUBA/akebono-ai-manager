@@ -75,7 +75,7 @@ sequenceDiagram
 | Cloud Scheduler → batch | Cloud Run IAM(--no-allow-unauthenticated)+アプリ層 OIDC 検証(発行者・audience・呼び出し元 SA)の多層防御 |
 | ブラウザ → dashboard | ingress を LB(IAP)経由のみに制限+IAP JWT の署名検証(AUTH_MODE=iap)の多層防御。ロール(admin/member)は ops.users で解決し、管理者限定ページを分離 |
 | GitHub Actions → GCP | Workload Identity Federation(キーレス)。attribute-condition で対象リポジトリに限定 |
-| アプリ → RDS | SSL 必須+CA 検証、DB ユーザー分離(app_rw / dashboard_ro / 管理)、dashboard_ro は生の対話ログ参照不可 |
+| アプリ → RDS | SSL 必須+CA 検証、DB ユーザー分離(ai_manager_app_rw / ai_manager_dashboard_ro / 管理)、ai_manager_dashboard_ro は生の対話ログ参照不可 |
 
 ## 5. 設計判断の記録(ADR)
 
@@ -118,6 +118,17 @@ sequenceDiagram
 - **決定**: 要件 §8 の `infra/`(Terraform)は Phase 1 では作らず、`scripts/setup/bootstrap-gcp.ps1`(冪等な gcloud ラッパー)で GCP リソースを管理する
 - **理由**: セットアップ対象が少なく(SA / WIF / Artifact Registry / API 有効化)、オペレーターの実行環境が PowerShell 前提のため、Terraform の導入・状態管理コストが見合わない。Cloud Run・Scheduler は deploy.yml が宣言的に上書きするため実質的な構成ドリフトは起きない
 - **再検討条件**: マルチテナント化(SaaS 転用)で環境複製が必要になった時点で Terraform 化する(要件 §11 の IaC 方針を引き継ぐ)
+
+### ADR-7: 共有プロジェクト同居のための命名プレフィックス
+
+- **決定**: 本アプリは既存の Firebase/GCP プロジェクト・既存 RDS インスタンスに他アプリと同居するため、
+  作成するリソースはすべて固有プレフィックスで名前空間を分離する。
+  GCP リソースは `ai-manager-`(WIF プール/プロバイダも `ai-manager-github-pool` / `ai-manager-github-provider`)、
+  PostgreSQL ロールは `ai_manager_`(`ai_manager_app_rw` / `ai_manager_dashboard_ro`)、pg_cron ジョブは `ai-manager-*`
+- **理由**: WIF プールや DB ロールのような汎用名は同居アプリと衝突・共用事故のリスクがある。
+  Cloud NAT も専用サブネットに限定し、他アプリの外部通信経路に影響を与えない
+  (deployment-setup.md「命名ポリシー」参照)。Firestore / Firebase Hosting は本アプリでは使用しない
+- **備考**: 要件 §7.5 のロール名例(app_rw 等)からの改名はこの判断による(役割・権限は同一)
 
 ## 6. 未決事項(要件 §13)への Phase 1 時点の回答
 

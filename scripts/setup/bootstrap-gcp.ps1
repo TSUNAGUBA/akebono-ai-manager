@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   AI マネージャーのデプロイに必要な GCP リソースを冪等に作成する。
 
@@ -12,19 +12,23 @@
   完了後、repository secrets に設定すべき値を deploy-config.json 形式で出力する。
 
 .EXAMPLE
-  ./bootstrap-gcp.ps1 -ProjectId my-project -GithubRepo tsunaguba/akebono-ai-manager
+  ./bootstrap-gcp.ps1 -ProjectId my-project -GithubRepo TSUNAGUBA/akebono-ai-manager
 
 .NOTES
   前提: gcloud CLI がインストール済みで、オーナー相当の権限で gcloud auth login 済みであること。
+  - GithubRepo は GitHub 上の正式な大文字小文字で指定すること(WIF の attribute-condition は
+    OIDC トークンの repository クレームと大文字小文字を区別して照合される)。
+  - 作成するリソースはすべて ai-manager- プレフィックス付きで、既存アプリと同居する
+    GCP プロジェクトでも名前が衝突しない(docs/operations/deployment-setup.md の命名ポリシー参照)。
 #>
 [CmdletBinding()]
 param(
   [Parameter(Mandatory = $true)][string]$ProjectId,
-  [Parameter(Mandatory = $true)][string]$GithubRepo, # 例: tsunaguba/akebono-ai-manager
+  [Parameter(Mandatory = $true)][string]$GithubRepo, # 例: TSUNAGUBA/akebono-ai-manager(大文字小文字も正確に)
   [string]$Region = 'asia-northeast1',
   [string]$ArtifactRepository = 'ai-manager',
-  [string]$PoolId = 'github-pool',
-  [string]$ProviderId = 'github-provider',
+  [string]$PoolId = 'ai-manager-github-pool',
+  [string]$ProviderId = 'ai-manager-github-provider',
   [string]$DeployerSaName = 'ai-manager-deployer',
   [string]$RuntimeSaName = 'ai-manager-runtime',
   [string]$OutputConfigPath = './deploy-config.json'
@@ -42,7 +46,16 @@ function Invoke-Gcloud {
 
 function Test-GcloudResource {
   param([string[]]$DescribeArguments)
-  & gcloud @DescribeArguments *> $null
+  # Windows PowerShell 5.1 では native コマンドの stderr をリダイレクトすると
+  # $ErrorActionPreference='Stop' の下で致命的エラーになるため、一時的に緩和する
+  # (存在しないリソースの describe は stderr に NOT_FOUND を出すのが正常系)
+  $previousEap = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    & gcloud @DescribeArguments *> $null
+  } finally {
+    $ErrorActionPreference = $previousEap
+  }
   return ($LASTEXITCODE -eq 0)
 }
 
@@ -97,8 +110,14 @@ foreach ($sa in @(
 }
 
 Write-Host "== 4/5 IAM ロール ==" -ForegroundColor Cyan
-# デプロイ SA: Cloud Run 管理・イメージ push・Scheduler 管理(最小権限の原則)
-$deployerRoles = @('roles/run.admin', 'roles/artifactregistry.writer', 'roles/cloudscheduler.admin')
+# デプロイ SA: Cloud Run 管理・イメージ push・Scheduler 管理・VPC コネクタ利用(最小権限の原則)
+# vpcaccess.user は --vpc-connector 付きデプロイ(deploy.yml)に必要
+$deployerRoles = @(
+  'roles/run.admin',
+  'roles/artifactregistry.writer',
+  'roles/cloudscheduler.admin',
+  'roles/vpcaccess.user'
+)
 foreach ($role in $deployerRoles) {
   Invoke-Gcloud @(
     'projects', 'add-iam-policy-binding', $ProjectId,
@@ -134,7 +153,7 @@ if (-not (Test-GcloudResource @('iam', 'workload-identity-pools', 'describe', $P
   Invoke-Gcloud @(
     'iam', 'workload-identity-pools', 'create', $PoolId,
     '--location', 'global',
-    '--display-name', 'GitHub Actions',
+    '--display-name', 'AI Manager GitHub Actions',
     '--project', $ProjectId
   )
 } else {
@@ -148,7 +167,7 @@ if (-not (Test-GcloudResource @('iam', 'workload-identity-pools', 'providers', '
     '--workload-identity-pool', $PoolId,
     '--location', 'global',
     '--project', $ProjectId,
-    '--display-name', 'GitHub OIDC',
+    '--display-name', 'AI Manager GitHub OIDC',
     '--issuer-uri', 'https://token.actions.githubusercontent.com',
     '--attribute-mapping', 'google.subject=assertion.sub,attribute.repository=assertion.repository',
     '--attribute-condition', "assertion.repository == '$GithubRepo'"

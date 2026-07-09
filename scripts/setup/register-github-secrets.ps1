@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   デプロイ用の設定値を GitHub repository secrets に一括登録する。
 
@@ -8,15 +8,15 @@
   .github/workflows/deploy.yml はこれらの secrets を読み取って動作する。
 
 .EXAMPLE
-  ./register-github-secrets.ps1 -Repo tsunaguba/akebono-ai-manager
-  ./register-github-secrets.ps1 -Repo tsunaguba/akebono-ai-manager -ConfigPath ./deploy-config.json
+  ./register-github-secrets.ps1 -Repo TSUNAGUBA/akebono-ai-manager
+  ./register-github-secrets.ps1 -Repo TSUNAGUBA/akebono-ai-manager -ConfigPath ./deploy-config.json
 
 .NOTES
   前提: gh CLI がインストール済みで gh auth login 済みであること。
 #>
 [CmdletBinding()]
 param(
-  [Parameter(Mandatory = $true)][string]$Repo, # 例: tsunaguba/akebono-ai-manager
+  [Parameter(Mandatory = $true)][string]$Repo, # 例: TSUNAGUBA/akebono-ai-manager
   [string]$ConfigPath = './deploy-config.json'
 )
 
@@ -43,7 +43,15 @@ if (-not (Test-Path $ConfigPath)) {
   throw "設定ファイルが見つかりません: $ConfigPath(scripts/setup/deploy-config.sample.json をコピーして作成するか、bootstrap-gcp.ps1 を先に実行してください)"
 }
 
-& gh auth status *> $null
+# PS 5.1 では native コマンドの stderr リダイレクトが EAP='Stop' で致命的エラーになるため一時緩和
+# (gh auth status はバージョンにより認証成功時もステータスを stderr に出力する)
+$previousEap = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try {
+  & gh auth status *> $null
+} finally {
+  $ErrorActionPreference = $previousEap
+}
 if ($LASTEXITCODE -ne 0) {
   throw 'gh CLI が未認証です。先に gh auth login を実行してください'
 }
