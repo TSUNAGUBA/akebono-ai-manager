@@ -95,7 +95,9 @@ function matchRoute(
 
 /**
  * 各サービス共通の HTTP サーバー。
- * - GET /healthz を標準装備
+ * - GET /health を標準装備
+ *   (注意: /healthz は Cloud Run のフロントエンドが予約しており、コンテナに届く前に
+ *    Google の 404 が返るため使用しないこと)
  * - AppError は status + エラーコード付き JSON に変換
  * - 想定外エラーは 500 とし詳細はログのみに残す
  */
@@ -114,7 +116,7 @@ async function handleRequest(
   const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
   const started = Date.now();
   try {
-    if (method === 'GET' && url.pathname === '/healthz') {
+    if (method === 'GET' && url.pathname === '/health') {
       sendJson(res, 200, { status: 'ok' });
       return;
     }
