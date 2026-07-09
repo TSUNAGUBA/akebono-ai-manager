@@ -23,8 +23,8 @@ export interface Route {
 
 const MAX_BODY_BYTES = 1024 * 1024; // 1MiB
 
-/** JSON ボディを読む。サイズ超過・不正 JSON は AIM-3103。 */
-export async function readJsonBody<T = unknown>(req: http.IncomingMessage): Promise<T> {
+/** リクエストボディを UTF-8 文字列として読む。サイズ超過は AIM-3103(413)。 */
+async function readRawBody(req: http.IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
   let total = 0;
   for await (const chunk of req) {
@@ -37,7 +37,12 @@ export async function readJsonBody<T = unknown>(req: http.IncomingMessage): Prom
     }
     chunks.push(buf);
   }
-  const raw = Buffer.concat(chunks).toString('utf8');
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+/** JSON ボディを読む。サイズ超過・不正 JSON は AIM-3103。 */
+export async function readJsonBody<T = unknown>(req: http.IncomingMessage): Promise<T> {
+  const raw = await readRawBody(req);
   if (raw === '') {
     throw new AppError(ERROR_CODES.REQUEST_BODY_INVALID, 'リクエストボディが空です', { status: 400 });
   }
@@ -49,6 +54,15 @@ export async function readJsonBody<T = unknown>(req: http.IncomingMessage): Prom
       cause: err,
     });
   }
+}
+
+/**
+ * フォームボディ(application/x-www-form-urlencoded)を読む。
+ * 空ボディは空の URLSearchParams を返す(必須項目の検証は呼び出し側の責務)。
+ */
+export async function readFormBody(req: http.IncomingMessage): Promise<URLSearchParams> {
+  const raw = await readRawBody(req);
+  return new URLSearchParams(raw);
 }
 
 export function sendJson(res: http.ServerResponse, status: number, body: unknown): void {

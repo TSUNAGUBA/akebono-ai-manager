@@ -7,6 +7,10 @@ import { renderMe } from '../src/pages/me.js';
 import { renderOverview } from '../src/pages/overview.js';
 import { renderProjects } from '../src/pages/projects.js';
 import { renderWorkload } from '../src/pages/workload.js';
+import type { AdminPageContext } from '../src/pages/admin/common.js';
+import { handleAdminCustomersPost, renderAdminCustomers } from '../src/pages/admin/customers.js';
+import { handleAdminIndustriesPost, renderAdminIndustries } from '../src/pages/admin/industries.js';
+import { handleAdminRelationsPost, renderAdminRelations } from '../src/pages/admin/relations.js';
 
 /**
  * 本番で発生した SQLSTATE 42P02(there is no parameter $1)の回帰テスト。
@@ -19,11 +23,15 @@ interface CapturedCall {
 }
 
 function stubPool(captured: CapturedCall[]): pg.Pool {
+  const capture = (text: string, params?: unknown[]) => {
+    captured.push({ text, params: params ?? [] });
+    // rowCount は「対象が見つからない」分岐に入らないよう 1 を返す
+    return Promise.resolve({ rows: [], rowCount: 1 });
+  };
   return {
-    query: (text: string, params?: unknown[]) => {
-      captured.push({ text, params: params ?? [] });
-      return Promise.resolve({ rows: [] });
-    },
+    query: capture,
+    // withClient / withTransaction(トランザクション書込)用の接続スタブ
+    connect: () => Promise.resolve({ query: capture, release: () => undefined }),
   } as unknown as pg.Pool;
 }
 
@@ -67,6 +75,132 @@ describe('ダッシュボード各ページの SQL パラメータ整合', () =>
       // 空行データでの描画クラッシュもこのテストで検知する(握りつぶさない)
       await render(stubPool(captured));
       assertCallsValid(captured);
+    });
+  }
+});
+
+describe('マスタ管理ページの SQL パラメータ整合', () => {
+  const adminCtx = (path: string): AdminPageContext => ({
+    csrfToken: 'a'.repeat(64),
+    url: new URL(`http://localhost${path}`),
+  });
+
+  const adminPages: Array<[string, string, (pool: pg.Pool, ctx: AdminPageContext) => Promise<unknown>]> = [
+    ['admin/industries', '/admin/industries', renderAdminIndustries],
+    ['admin/customers', '/admin/customers', renderAdminCustomers],
+    ['admin/relations', '/admin/relations', renderAdminRelations],
+  ];
+
+  for (const [name, path, render] of adminPages) {
+    it(`${name}(GET): 実行された全クエリでプレースホルダ数とパラメータ数が一致する`, async () => {
+      const captured: CapturedCall[] = [];
+      await render(stubPool(captured), adminCtx(path));
+      assertCallsValid(captured);
+    });
+  }
+
+  const posts: Array<[string, (pool: pg.Pool) => Promise<string>]> = [
+    [
+      'industries create',
+      (pool) =>
+        handleAdminIndustriesPost(
+          pool,
+          viewer,
+          new URLSearchParams({ action: 'create', industry_id: 'retail', name: '小売業', display_order: '10', active: 'on' }),
+        ),
+    ],
+    [
+      'industries update',
+      (pool) =>
+        handleAdminIndustriesPost(
+          pool,
+          viewer,
+          new URLSearchParams({ action: 'update', industry_id: 'retail', name: '小売業' }),
+        ),
+    ],
+    [
+      'customers create(トランザクション)',
+      (pool) => {
+        const form = new URLSearchParams({
+          action: 'create',
+          customer_id: 'shimamura',
+          name: 'しまむら',
+          primary_industry: 'retail',
+        });
+        form.append('industries', 'retail');
+        form.append('industries', 'apparel');
+        return handleAdminCustomersPost(pool, viewer, form);
+      },
+    ],
+    [
+      'customers update(トランザクション)',
+      (pool) => {
+        const form = new URLSearchParams({
+          action: 'update',
+          customer_id: 'shimamura',
+          name: 'しまむら',
+          primary_industry: 'retail',
+        });
+        form.append('industries', 'retail');
+        return handleAdminCustomersPost(pool, viewer, form);
+      },
+    ],
+    [
+      'relations create_relation',
+      (pool) =>
+        handleAdminRelationsPost(
+          pool,
+          viewer,
+          new URLSearchParams({
+            action: 'create_relation',
+            from_customer_id: 'undeux',
+            to_customer_id: 'shimamura',
+            relation_type: 'supplies_to',
+            notes: 'テスト',
+          }),
+        ),
+    ],
+    [
+      'relations delete_relation',
+      (pool) =>
+        handleAdminRelationsPost(
+          pool,
+          viewer,
+          new URLSearchParams({
+            action: 'delete_relation',
+            from_customer_id: 'undeux',
+            to_customer_id: 'shimamura',
+            relation_type: 'supplies_to',
+          }),
+        ),
+    ],
+    [
+      'relations create_type',
+      (pool) =>
+        handleAdminRelationsPost(
+          pool,
+          viewer,
+          new URLSearchParams({ action: 'create_type', relation_type: 'sells_via', label: '販売チャネル', active: 'on' }),
+        ),
+    ],
+    [
+      'relations update_type',
+      (pool) =>
+        handleAdminRelationsPost(
+          pool,
+          viewer,
+          new URLSearchParams({ action: 'update_type', relation_type: 'sells_via', label: '販売チャネル' }),
+        ),
+    ],
+  ];
+
+  for (const [name, run] of posts) {
+    it(`${name}(POST): 実行された全クエリでプレースホルダ数とパラメータ数が一致する`, async () => {
+      const captured: CapturedCall[] = [];
+      const location = await run(stubPool(captured));
+      assertCallsValid(captured);
+      // PRG パターン: 成功時はリダイレクト先(?saved=)を返す
+      expect(location).toContain('saved=');
     });
   }
 });

@@ -60,6 +60,14 @@ export const ERROR_CODES = {
 
   /** ダッシュボードのクエリに失敗 */
   DASHBOARD_QUERY_FAILED: 'AIM-6001',
+  /** マスタ管理用の DB 接続(DB_ADMIN_USER / DB_ADMIN_PASSWORD)が未構成 */
+  ADMIN_DB_NOT_CONFIGURED: 'AIM-6002',
+  /** CSRF トークンの検証に失敗(二重送信クッキー方式) */
+  CSRF_TOKEN_INVALID: 'AIM-6003',
+  /** マスタ管理フォームの入力値が不正 */
+  ADMIN_INPUT_INVALID: 'AIM-6004',
+  /** マスタ管理の書込が既存データと競合(一意制約違反等) */
+  ADMIN_WRITE_CONFLICT: 'AIM-6005',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];
