@@ -85,3 +85,46 @@ export function looksLikeCompletionReport(text: string): boolean {
   if (trimmed.length > 120) return false;
   return COMPLETION_PATTERNS.some((p) => p.test(trimmed));
 }
+
+// ── タスク指示の検知(M3)─────────────────────────────────────────
+// 管理者のメッセージが「メンバーへのタスク指示」かをルールベースで先行判定する。
+// 確実なパターンのみ 'yes' とし、部分的なシグナルは 'ambiguous' として
+// flash-lite での分類(TASK_INSTRUCTION_CLASSIFY_*)に委ねる。
+
+export type TaskInstructionSignal = 'yes' | 'ambiguous' | 'no';
+
+/** 「タスク:」「依頼:」プレフィックス(全角・半角コロン両対応)。 */
+const TASK_PREFIX_PATTERN = /^(タスク|依頼)\s*[::]/;
+
+/** 担当者への割り当て表現(「〜さんに」等)。 */
+const ASSIGNEE_PATTERN = /(さん|くん|君|氏)に/;
+
+/** 期限の表現(「〜までに」等)。 */
+const DEADLINE_PATTERN = /(までに|期限|締め切り|締切|〆切|今日中|本日中|今週中|来週中|月末まで)/;
+
+/** 依頼の動詞表現。 */
+const REQUEST_VERB_PATTERN =
+  /(お願い|依頼|頼(み|んで)|やって|進めて|対応して|作成して|作って|準備して|まとめて|調整して|確認して|共有して|送って|渡して|任せ|アサイン|振って)/;
+
+/**
+ * タスク指示らしさのルールベース判定(M3)。
+ * - 'yes':       プレフィックス、または 担当者+期限+依頼動詞 が揃った平叙文
+ * - 'ambiguous': 担当者または期限+依頼動詞(疑問文を含む)→ LLM 分類へ
+ * - 'no':        それ以外(通常の QA・対話として処理)
+ */
+export function detectTaskInstruction(text: string): TaskInstructionSignal {
+  const trimmed = text.trim();
+  if (TASK_PREFIX_PATTERN.test(trimmed)) return 'yes';
+
+  const hasAssignee = ASSIGNEE_PATTERN.test(trimmed);
+  const hasDeadline = DEADLINE_PATTERN.test(trimmed);
+  const hasRequestVerb = REQUEST_VERB_PATTERN.test(trimmed);
+  const isQuestion = /[??]\s*$/.test(trimmed);
+
+  if (hasAssignee && hasDeadline && hasRequestVerb) {
+    // 疑問文(「〜してもらうべきですか?」等)は相談の可能性があるため LLM に委ねる
+    return isQuestion ? 'ambiguous' : 'yes';
+  }
+  if ((hasAssignee || hasDeadline) && hasRequestVerb) return 'ambiguous';
+  return 'no';
+}

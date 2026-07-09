@@ -160,12 +160,16 @@ export async function runKnowledgeSync(pool: pg.Pool): Promise<JobSummary> {
     }
   }
 
-  // Drive から削除された文書のチャンクを削除(全ファイル列挙に成功した場合のみ)
+  // Drive から削除された文書のチャンクを削除(全ファイル列挙に成功した場合のみ)。
+  // doc_id='escalation/{id}' のチャンクは Drive 由来ではなく、SoT が ops.escalations にある
+  // 裁定ナレッジのキャッシュ(chat-gateway が還流)のため、掃除対象から除外する。
   try {
     if (files.length > 0) {
       await query(
         pool,
-        'DELETE FROM rag.knowledge_chunks WHERE NOT (doc_id = ANY($1::text[]))',
+        `DELETE FROM rag.knowledge_chunks
+         WHERE NOT (doc_id = ANY($1::text[]))
+           AND doc_id NOT LIKE 'escalation/%'`,
         [seenDocIds],
       );
     }

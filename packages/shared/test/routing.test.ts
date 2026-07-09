@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   classifyMessage,
+  detectTaskInstruction,
   looksLikeCompletionReport,
   tierForCategory,
 } from '../src/routing.js';
@@ -36,6 +37,38 @@ describe('classifyMessage', () => {
     expect(tierForCategory('routine')).toBe('flash-lite');
     expect(tierForCategory('knowledge')).toBe('flash');
     expect(tierForCategory('thinking')).toBe('pro');
+  });
+});
+
+describe('detectTaskInstruction(M3 タスク指示のルールベース判定)', () => {
+  it('「タスク:」「依頼:」プレフィックスは yes(全角・半角コロン)', () => {
+    expect(detectTaskInstruction('タスク: A社の見積もり資料を作成')).toBe('yes');
+    expect(detectTaskInstruction('タスク:A社の見積もり資料を作成')).toBe('yes');
+    expect(detectTaskInstruction('依頼: 在庫レポートの更新')).toBe('yes');
+  });
+
+  it('担当者+期限+依頼動詞が揃った平叙文は yes', () => {
+    expect(
+      detectTaskInstruction('田中さんに金曜までにA社の見積もりを作成してもらうようお願いします'),
+    ).toBe('yes');
+    expect(detectTaskInstruction('佐藤さんに今週中にWMSの検証をやってもらってください')).toBe('yes');
+  });
+
+  it('担当者+期限+依頼動詞でも疑問文は ambiguous(相談の可能性)', () => {
+    expect(
+      detectTaskInstruction('田中さんに金曜までに見積もり作成をお願いするべきですか?'),
+    ).toBe('ambiguous');
+  });
+
+  it('シグナルが部分的なら ambiguous(LLM 分類へ)', () => {
+    expect(detectTaskInstruction('田中さんにこの件をお願いしたい')).toBe('ambiguous');
+    expect(detectTaskInstruction('今週中に在庫レポートをまとめてほしい')).toBe('ambiguous');
+  });
+
+  it('通常の質問・報告は no', () => {
+    expect(detectTaskInstruction('種まきリストとは?')).toBe('no');
+    expect(detectTaskInstruction('A社の対応が完了しました')).toBe('no');
+    expect(detectTaskInstruction('おはようございます')).toBe('no');
   });
 });
 
