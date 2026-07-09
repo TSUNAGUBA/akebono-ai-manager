@@ -50,6 +50,7 @@ jobs:
           GCP_DEPLOY_SERVICE_ACCOUNT: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
           GCP_RUNTIME_SERVICE_ACCOUNT: ${{ secrets.GCP_RUNTIME_SERVICE_ACCOUNT }}
           GCP_ARTIFACT_REPOSITORY: ${{ secrets.GCP_ARTIFACT_REPOSITORY }}
+          DASHBOARD_EXPOSURE: ${{ secrets.DASHBOARD_EXPOSURE }}
         run: |
           missing=""
           for name in GCP_PROJECT_ID GCP_PROJECT_NUMBER GCP_REGION GCP_WORKLOAD_IDENTITY_PROVIDER GCP_DEPLOY_SERVICE_ACCOUNT GCP_RUNTIME_SERVICE_ACCOUNT GCP_ARTIFACT_REPOSITORY; do
@@ -60,6 +61,14 @@ jobs:
             echo "scripts/setup/register-github-secrets.ps1 で登録してください(docs/operations/deployment-setup.md 参照)"
             exit 1
           fi
+          # 途中のサービスまでデプロイされた状態で止まらないよう、設定値の妥当性はここで fail-fast する
+          case "${DASHBOARD_EXPOSURE:-lb-iap}" in
+            lb-iap|direct-iap) ;;
+            *)
+              echo "::error::DASHBOARD_EXPOSURE は lb-iap / direct-iap のいずれかです(secret 値はログにマスクされるため deploy-config.json を確認してください)"
+              exit 1
+              ;;
+          esac
 
       - name: GCP 認証(Workload Identity Federation)
         uses: google-github-actions/auth@v2
@@ -225,15 +234,23 @@ jobs:
           #   lb-iap(既定): LB+IAP 経由のみ許可し、*.run.app への直接アクセスを ingress で遮断
           #   direct-iap  : Cloud Run 直付け IAP(MVP 向け・LB 不要)。*.run.app を IAP 保護のまま公開。
           #                 IAP 有効化(一回)は手動 — 未実施でも --no-allow-unauthenticated のため全拒否で安全側
-          case "${DASHBOARD_EXPOSURE:-lb-iap}" in
+          EXPOSURE="${DASHBOARD_EXPOSURE:-lb-iap}"
+          case "$EXPOSURE" in
             lb-iap)     INGRESS=internal-and-cloud-load-balancing; AUTH_FLAG=--allow-unauthenticated;    DEFAULT_AUTH_MODE=iap ;;
             direct-iap) INGRESS=all;                               AUTH_FLAG=--no-allow-unauthenticated; DEFAULT_AUTH_MODE=header ;;
             *)
-              echo "::error::DASHBOARD_EXPOSURE は lb-iap / direct-iap のいずれかです(現在値: ${DASHBOARD_EXPOSURE})"
+              echo "::error::DASHBOARD_EXPOSURE は lb-iap / direct-iap のいずれかです"
               exit 1
               ;;
           esac
-          ENV_VARS="GCP_PROJECT_ID=${GCP_PROJECT_ID},GCP_REGION=${GCP_REGION},AUTH_MODE=${DASHBOARD_AUTH_MODE:-$DEFAULT_AUTH_MODE},DB_POOL_MAX=5"
+          AUTH_MODE="${DASHBOARD_AUTH_MODE:-$DEFAULT_AUTH_MODE}"
+          # 旧既定の DASHBOARD_AUTH_MODE=iap が残ったまま direct-iap に切り替えると、
+          # IAP_AUDIENCE 未設定で全リクエストが失敗する。デプロイ前に fail-fast する
+          if [ "$EXPOSURE" = "direct-iap" ] && [ "$AUTH_MODE" = "iap" ] && [ -z "$DASHBOARD_IAP_AUDIENCE" ]; then
+            echo "::error::direct-iap で AUTH_MODE=iap ですが DASHBOARD_IAP_AUDIENCE が未設定です。DASHBOARD_AUTH_MODE を header に変更するか、secret を削除してください(docs/operations/deployment-setup.md Step 7-4 A)"
+            exit 1
+          fi
+          ENV_VARS="GCP_PROJECT_ID=${GCP_PROJECT_ID},GCP_REGION=${GCP_REGION},AUTH_MODE=${AUTH_MODE},DB_POOL_MAX=5"
           if [ -n "$DASHBOARD_IAP_AUDIENCE" ]; then
             ENV_VARS="${ENV_VARS},IAP_AUDIENCE=${DASHBOARD_IAP_AUDIENCE}"
           fi
