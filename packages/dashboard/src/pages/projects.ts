@@ -32,6 +32,7 @@ export async function renderProjects(pool: pg.Pool): Promise<Raw> {
      LEFT JOIN ops.tasks t ON t.project_id = p.project_id
      GROUP BY p.project_id, p.name, c.name, p.status, p.priority
      ORDER BY p.priority NULLS LAST, p.name`,
+    [today],
   );
 
   const health = await query<{
