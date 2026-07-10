@@ -9,6 +9,7 @@ import {
   trashFile,
   upsertTextFile,
   type DriveFile,
+  type MultipartFile,
 } from '@ai-manager/shared';
 import type pg from 'pg';
 import { badge, responsiveTable, section } from '../../render/components.js';
@@ -34,6 +35,8 @@ const CONTENT_MAX_BYTES = 200 * 1024;
 const DRIVE_FILE_ID_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/;
 /** 「今すぐ同期」の応答待ち上限。dashboard の Cloud Run タイムアウト(60s)より短く保つ。 */
 const SYNC_WAIT_MS = 45_000;
+/** ファイルアップロードの1回あたり上限件数(v0.6。リクエスト全体は multipart の 4MiB 上限)。 */
+const MAX_UPLOAD_FILES = 10;
 
 /**
  * ファイル名の検証と正規化。拡張子がなければ .md を付与し、規約外は AIM-6004。
@@ -98,6 +101,30 @@ const SYNC_ERROR_MESSAGES: Record<string, string> = {
   timeout:
     '同期の応答待ちがタイムアウトしました。同期はバックグラウンドで継続している可能性があるため、しばらくしてからこのページを再読み込みして同期状態を確認してください',
 };
+
+/** ファイルアップロードの結果フラッシュ(?uploaded=1&created=…。PRG: 再読み込みで再投入しない)。 */
+function uploadFlash(ctx: AdminPageContext): Raw {
+  const params = ctx.url.searchParams;
+  if (params.get('uploaded') !== '1') return raw('');
+  const count = (name: string): string => {
+    const value = params.get(name) ?? '';
+    return /^\d{1,6}$/.test(value) ? value : '0';
+  };
+  const failed = count('failed');
+  const tone = failed === '0' ? 'ok' : 'error';
+  // 失敗ファイル名はファイル名規約に一致するもののみ表示する(クエリ偽装による表示注入の防止)
+  const failedNames = (params.get('failed_names') ?? '')
+    .split(',')
+    .filter((n) => KNOWLEDGE_FILE_NAME_PATTERN.test(n))
+    .slice(0, MAX_UPLOAD_FILES);
+  const failedNote =
+    failedNames.length > 0
+      ? `。失敗したファイル: ${failedNames.map((n) => h(n)).join('、')}(ログ AIM-6006 を確認してください)`
+      : '';
+  return raw(
+    `<div class="alert ${tone}">ファイルを投入しました(新規 ${count('created')} 件・上書き ${count('updated')} 件・失敗 ${failed} 件)${failedNote}</div>`,
+  );
+}
 
 function syncFlash(ctx: AdminPageContext): Raw {
   const params = ctx.url.searchParams;
@@ -271,10 +298,8 @@ export async function renderAdminKnowledge(pool: pg.Pool, ctx: AdminPageContext)
       .map((c) => `<option value="${h(c.customer_id)}">${h(`${c.name}(${c.customer_id})`)}</option>`)
       .join('');
 
-  const uploadForm = html`<form method="post" action="${PATH}" class="card form">
-    ${csrfField(ctx)}
-    <input type="hidden" name="action" value="upload">
-    <label class="field">格納先</label>
+  // 格納先の選択 UI(ファイルアップロード・直接入力の両フォームで共通)
+  const destinationFields = `<label class="field">格納先</label>
     <div class="check-grid">
       <label class="check-row"><input type="radio" name="target" value="judgement" checked> 共通(judgement/ — 判断基準・例え話)</label>
       <label class="check-row"><input type="radio" name="target" value="domain"> 業界(domain/{業界ID}/)</label>
@@ -282,11 +307,34 @@ export async function renderAdminKnowledge(pool: pg.Pool, ctx: AdminPageContext)
     </div>
     <div class="form-grid" style="margin-top:14px">
       <label class="field">業界(格納先が「業界」の場合に選択)
-        <select name="industry_id">${raw(industryOptions)}</select>
+        <select name="industry_id">${industryOptions}</select>
       </label>
       <label class="field">顧客(格納先が「顧客」の場合に選択)
-        <select name="customer_id">${raw(customerOptions)}</select>
+        <select name="customer_id">${customerOptions}</select>
       </label>
+    </div>`;
+
+  // ── ファイルアップロード投入(v0.6)──
+  const fileUploadForm = html`<form method="post" action="${PATH}" enctype="multipart/form-data" class="card form">
+    ${csrfField(ctx)}
+    <input type="hidden" name="action" value="upload_files">
+    ${raw(destinationFields)}
+    <label class="field" style="margin-top:14px">ファイル(複数選択可。.md / .txt、1ファイル 200KB 以内・最大 ${MAX_UPLOAD_FILES} 件)
+      <input type="file" name="files" multiple required accept=".md,.txt,text/markdown,text/plain">
+    </label>
+    <p class="form-help">
+      ファイル名は小文字に変換して保存します(使える文字: 半角小文字英数字・ドット・ハイフン・アンダースコア)。
+      同名ファイルが既にある場合は内容を上書きします。1件でも規約外のファイルがあると全件投入されません(投入前に一括検証)。
+    </p>
+    <button class="btn" type="submit">アップロードする</button>
+  </form>`;
+
+  // ── 直接入力投入(v0.4)──
+  const uploadForm = html`<form method="post" action="${PATH}" class="card form">
+    ${csrfField(ctx)}
+    <input type="hidden" name="action" value="upload">
+    ${raw(destinationFields)}
+    <div class="form-grid" style="margin-top:14px">
       <label class="field">ファイル名
         <input type="text" name="file_name" required maxlength="128" pattern="[a-z0-9_.-]+"
                placeholder="例: operations.md"
@@ -307,21 +355,63 @@ export async function renderAdminKnowledge(pool: pg.Pool, ctx: AdminPageContext)
   return html`
     ${adminTabs(PATH)}
     ${flashMessages(ctx)}
+    ${uploadFlash(ctx)}
     ${syncFlash(ctx)}
     ${section(
       'ナレッジ文書の一覧',
       html`${fileTable}${statsNote}${syncControl}`,
       'SoT は Drive です。削除はゴミ箱への移動で(復元可能)、対応するチャンクは次回同期で掃除されます',
     )}
-    ${section('文書の投入', uploadForm)}
+    ${section('文書の投入(ファイルアップロード)', fileUploadForm)}
+    ${section('文書の投入(直接入力)', uploadForm)}
   `;
 }
 
-/** ナレッジ文書の投入・削除・即時同期。成功時はリダイレクト先を返す(PRG パターン)。 */
+/**
+ * 格納先の検証と保存先フォルダの解決(直接入力・ファイルアップロード共通)。
+ * 業界・顧客の実在性はマスタ(SoT)で検証する(セレクト偽装によるフォルダ規約外の作成を防ぐ)。
+ * フォルダ作成の副作用があるため、入力(ファイル名・本文)の検証後に呼ぶこと。
+ */
+async function resolveUploadDestination(
+  pool: pg.Pool,
+  form: URLSearchParams,
+  rootFolderId: string,
+): Promise<{ segments: string[]; targetFolderId: string }> {
+  const target = (form.get('target') ?? '').trim();
+  if (target !== 'judgement' && target !== 'domain' && target !== 'customer') {
+    throw invalidInput('格納先が不正です');
+  }
+  let industryId: string | null = null;
+  let customerId: string | null = null;
+  if (target === 'domain') {
+    industryId = requireRef(form, 'industry_id', '業界');
+    const found = await query(pool, `SELECT 1 FROM ops.industries WHERE industry_id = $1 AND active`, [
+      industryId,
+    ]);
+    if ((found.rowCount ?? 0) === 0) {
+      throw invalidInput('存在しない業界が指定されました。ページを再読み込みしてやり直してください');
+    }
+  }
+  if (target === 'customer') {
+    customerId = requireRef(form, 'customer_id', '顧客');
+    const found = await query(pool, `SELECT 1 FROM ops.customers WHERE customer_id = $1`, [
+      customerId,
+    ]);
+    if ((found.rowCount ?? 0) === 0) {
+      throw invalidInput('存在しない顧客が指定されました。ページを再読み込みしてやり直してください');
+    }
+  }
+  const segments = knowledgeFolderSegments(target, industryId, customerId);
+  const targetFolderId = await ensureSubfolder(rootFolderId, ...segments);
+  return { segments, targetFolderId };
+}
+
+/** ナレッジ文書の投入(直接入力・ファイル)・削除・即時同期。成功時はリダイレクト先を返す(PRG パターン)。 */
 export async function handleAdminKnowledgePost(
   pool: pg.Pool,
   viewer: Viewer,
   form: URLSearchParams,
+  files: MultipartFile[] = [],
 ): Promise<string> {
   const action = form.get('action');
   const folderId = optionalEnv('KNOWLEDGE_DRIVE_FOLDER_ID', '');
@@ -332,31 +422,6 @@ export async function handleAdminKnowledgePost(
   }
 
   if (action === 'upload') {
-    const target = (form.get('target') ?? '').trim();
-    if (target !== 'judgement' && target !== 'domain' && target !== 'customer') {
-      throw invalidInput('格納先が不正です');
-    }
-    // 業界・顧客の実在性はマスタ(SoT)で検証する(セレクト偽装によるフォルダ規約外の作成を防ぐ)
-    let industryId: string | null = null;
-    let customerId: string | null = null;
-    if (target === 'domain') {
-      industryId = requireRef(form, 'industry_id', '業界');
-      const found = await query(pool, `SELECT 1 FROM ops.industries WHERE industry_id = $1 AND active`, [
-        industryId,
-      ]);
-      if ((found.rowCount ?? 0) === 0) {
-        throw invalidInput('存在しない業界が指定されました。ページを再読み込みしてやり直してください');
-      }
-    }
-    if (target === 'customer') {
-      customerId = requireRef(form, 'customer_id', '顧客');
-      const found = await query(pool, `SELECT 1 FROM ops.customers WHERE customer_id = $1`, [
-        customerId,
-      ]);
-      if ((found.rowCount ?? 0) === 0) {
-        throw invalidInput('存在しない顧客が指定されました。ページを再読み込みしてやり直してください');
-      }
-    }
     const fileName = normalizeKnowledgeFileName(form.get('file_name') ?? '');
     const content = form.get('content') ?? '';
     if (content.trim() === '') throw invalidInput('本文を入力してください');
@@ -365,8 +430,7 @@ export async function handleAdminKnowledgePost(
       throw invalidInput('本文は 200KB 以内で入力してください');
     }
 
-    const segments = knowledgeFolderSegments(target, industryId, customerId);
-    const targetFolderId = await ensureSubfolder(folderId, ...segments);
+    const { segments, targetFolderId } = await resolveUploadDestination(pool, form, folderId);
     const result = await upsertTextFile(targetFolderId, fileName, content);
     auditLog(
       viewer,
@@ -376,6 +440,86 @@ export async function handleAdminKnowledgePost(
     );
     // upsert の結果(created / updated)をそのまま保存バナーに使う
     return `${PATH}?saved=${result.action}`;
+  }
+
+  if (action === 'upload_files') {
+    if (files.length === 0) {
+      throw invalidInput('ファイルを選択してください(.md / .txt、複数選択可)');
+    }
+    if (files.length > MAX_UPLOAD_FILES) {
+      throw invalidInput(
+        `一度に投入できるファイルは ${MAX_UPLOAD_FILES} 件までです(${files.length} 件が選択されています)`,
+      );
+    }
+    // 投入前の一括検証(v0.6 §2: 1件でも不正なら何も保存しない)
+    const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
+    const seen = new Set<string>();
+    const validated: Array<{ fileName: string; content: string; contentBytes: number }> = [];
+    for (const file of files) {
+      let fileName: string;
+      try {
+        // OS 由来の大文字を含むファイル名を規約(小文字)へ寄せる
+        fileName = normalizeKnowledgeFileName(file.fileName.toLowerCase());
+      } catch {
+        throw invalidInput(
+          `ファイル名が規約外です: ${file.fileName.slice(0, 128)}(半角の小文字英数字・ドット・ハイフン・アンダースコア+拡張子 .md / .txt)`,
+        );
+      }
+      if (seen.has(fileName)) {
+        throw invalidInput(`ファイル名が重複しています(小文字変換後): ${fileName}`);
+      }
+      seen.add(fileName);
+      if (file.content.length > CONTENT_MAX_BYTES) {
+        throw invalidInput(`200KB を超えるファイルは投入できません: ${fileName}`);
+      }
+      let content: string;
+      try {
+        content = utf8Decoder.decode(file.content);
+      } catch {
+        throw invalidInput(
+          `UTF-8 のテキストではありません: ${fileName}(文字コードを UTF-8 に変換して保存し直してください)`,
+        );
+      }
+      if (content.trim() === '') {
+        throw invalidInput(`内容が空のファイルは投入できません: ${fileName}`);
+      }
+      validated.push({ fileName, content, contentBytes: file.content.length });
+    }
+
+    const { segments, targetFolderId } = await resolveUploadDestination(pool, form, folderId);
+
+    // 保存(Drive 書込)の部分失敗は記録して残りを継続する(原則4)。
+    // ただし1件目からの失敗は設定不備(編集者共有の漏れ等)の可能性が高いため、
+    // 既存の案内付きエラー(AIM-6006 → Step 7-3)をそのまま表示する(v0.6 §2)
+    let created = 0;
+    let updated = 0;
+    const failedNames: string[] = [];
+    for (const [index, file] of validated.entries()) {
+      try {
+        const result = await upsertTextFile(targetFolderId, file.fileName, file.content);
+        if (result.action === 'created') created += 1;
+        else updated += 1;
+        auditLog(
+          viewer,
+          'knowledge.upload',
+          { path: segments.join('/'), fileName: file.fileName, fileId: result.fileId },
+          { result: result.action, contentBytes: file.contentBytes },
+        );
+      } catch (err) {
+        if (index === 0) throw err;
+        logger.error('ナレッジ文書の保存に失敗しました(残りのファイルは継続)', err, {
+          path: PATH,
+          fileName: file.fileName,
+        });
+        failedNames.push(file.fileName);
+      }
+    }
+    // 失敗ファイル名はフラッシュ表示用(URL 長の抑制のため先頭5件。全件はログに残る)
+    const failedQuery =
+      failedNames.length > 0
+        ? `&failed_names=${encodeURIComponent(failedNames.slice(0, 5).join(','))}`
+        : '';
+    return `${PATH}?uploaded=1&created=${created}&updated=${updated}&failed=${failedNames.length}${failedQuery}`;
   }
 
   if (action === 'delete') {

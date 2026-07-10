@@ -2,10 +2,13 @@ import {
   createAppServer,
   ERROR_CODES,
   isAppError,
+  isMultipartRequest,
   logger,
   readFormBody,
+  readMultipartFormBody,
   sendHtml,
   sendText,
+  type MultipartFile,
   type Route,
 } from '@ai-manager/shared';
 import type http from 'node:http';
@@ -94,7 +97,13 @@ interface AdminPageDef {
    */
   pool?: 'admin' | 'readonly';
   render: (pool: pg.Pool, ctx: AdminPageContext) => Promise<Raw>;
-  handlePost: (pool: pg.Pool, viewer: Viewer, form: URLSearchParams) => Promise<string>;
+  /** files はファイルアップロードフォーム(multipart)のページのみ受け取る(それ以外は空配列)。 */
+  handlePost: (
+    pool: pg.Pool,
+    viewer: Viewer,
+    form: URLSearchParams,
+    files: MultipartFile[],
+  ) => Promise<string>;
 }
 
 const ADMIN_PAGES: AdminPageDef[] = [
@@ -261,10 +270,19 @@ function adminPostRoute(pool: pg.Pool, pagePool: pg.Pool | undefined, def: Admin
         return;
       }
 
-      // 全 POST に CSRF トークン必須(要件 v0.3 §5.1)
+      // 全 POST に CSRF トークン必須(要件 v0.3 §5.1)。
+      // ファイルアップロード(multipart)でも hidden input はフィールドとして届くため
+      // 検証は同じ経路で行う
       let form: URLSearchParams;
+      let files: MultipartFile[] = [];
       try {
-        form = await readFormBody(req);
+        if (isMultipartRequest(req)) {
+          const multipart = await readMultipartFormBody(req);
+          form = multipart.fields;
+          files = multipart.files;
+        } else {
+          form = await readFormBody(req);
+        }
         verifyCsrfToken(req.headers.cookie, form);
       } catch (err) {
         // 認証系(401/403)以外の想定エラー(例: 413 ボディ過大)は、
@@ -284,7 +302,7 @@ function adminPostRoute(pool: pg.Pool, pagePool: pg.Pool | undefined, def: Admin
       }
 
       try {
-        const location = await def.handlePost(pagePool, viewer, form);
+        const location = await def.handlePost(pagePool, viewer, form, files);
         // PRG パターン: 再読み込みによる二重送信を防ぐ
         res.writeHead(303, { location });
         res.end();

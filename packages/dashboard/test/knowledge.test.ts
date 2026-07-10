@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type pg from 'pg';
-import { ERROR_CODES, isAppError, type DriveFile } from '@ai-manager/shared';
+import { AppError, ERROR_CODES, isAppError, type DriveFile, type MultipartFile } from '@ai-manager/shared';
 import type { Viewer } from '../src/render/layout.js';
 import type { AdminPageContext } from '../src/pages/admin/common.js';
 
@@ -389,5 +389,162 @@ describe('ナレッジ書込ハンドラ(POST)', () => {
       ERROR_CODES.ADMIN_INPUT_INVALID,
       400,
     );
+  });
+});
+
+describe('ナレッジ書込ハンドラ: ファイルアップロード(upload_files・v0.6)', () => {
+  const filesForm = (fields: Record<string, string> = {}): URLSearchParams =>
+    new URLSearchParams({ action: 'upload_files', target: 'judgement', ...fields });
+  const file = (fileName: string, content: string | Buffer): MultipartFile => ({
+    field: 'files',
+    fileName,
+    content: typeof content === 'string' ? Buffer.from(content, 'utf8') : content,
+  });
+
+  beforeEach(() => {
+    process.env['KNOWLEDGE_DRIVE_FOLDER_ID'] = 'root-folder';
+  });
+
+  it('複数ファイルを同じ格納先へ upsert し、新規・上書きの件数を PRG で渡す(受け入れ基準1)', async () => {
+    mocks.upsertTextFile
+      .mockResolvedValueOnce({ fileId: 'f1', action: 'created' })
+      .mockResolvedValueOnce({ fileId: 'f2', action: 'updated' });
+    const location = await handleAdminKnowledgePost(stubPool(), viewer, filesForm(), [
+      file('a.md', '# A'),
+      file('b.txt', 'B'),
+    ]);
+    expect(location).toBe('/admin/knowledge?uploaded=1&created=1&updated=1&failed=0');
+    expect(mocks.ensureSubfolder).toHaveBeenCalledTimes(1);
+    expect(mocks.ensureSubfolder).toHaveBeenCalledWith('root-folder', 'judgement');
+    expect(mocks.upsertTextFile).toHaveBeenNthCalledWith(1, 'target-folder', 'a.md', '# A');
+    expect(mocks.upsertTextFile).toHaveBeenNthCalledWith(2, 'target-folder', 'b.txt', 'B');
+  });
+
+  it('ファイル名は小文字に変換して保存する(OS 由来の大文字を規約へ寄せる)', async () => {
+    await handleAdminKnowledgePost(stubPool(), viewer, filesForm(), [file('README.MD', 'x')]);
+    expect(mocks.upsertTextFile).toHaveBeenCalledWith('target-folder', 'readme.md', 'x');
+  });
+
+  it('ファイル未選択は AIM-6004(400)', async () => {
+    await expectAppErrorAsync(
+      () => handleAdminKnowledgePost(stubPool(), viewer, filesForm(), []),
+      ERROR_CODES.ADMIN_INPUT_INVALID,
+      400,
+      'ファイルを選択',
+    );
+  });
+
+  it('上限(10件)超過は AIM-6004(400)で何も保存しない', async () => {
+    const files = Array.from({ length: 11 }, (_, i) => file(`f${i}.md`, 'x'));
+    await expectAppErrorAsync(
+      () => handleAdminKnowledgePost(stubPool(), viewer, filesForm(), files),
+      ERROR_CODES.ADMIN_INPUT_INVALID,
+      400,
+      '10 件まで',
+    );
+    expect(mocks.upsertTextFile).not.toHaveBeenCalled();
+  });
+
+  it('規約外のファイル名が1件でもあれば全件投入しない(受け入れ基準2)', async () => {
+    await expectAppErrorAsync(
+      () =>
+        handleAdminKnowledgePost(stubPool(), viewer, filesForm(), [
+          file('ok.md', 'x'),
+          file('日本語名.md', 'x'),
+        ]),
+      ERROR_CODES.ADMIN_INPUT_INVALID,
+      400,
+      '日本語名.md',
+    );
+    expect(mocks.ensureSubfolder).not.toHaveBeenCalled();
+    expect(mocks.upsertTextFile).not.toHaveBeenCalled();
+  });
+
+  it('小文字変換後の重複名は AIM-6004(400)', async () => {
+    await expectAppErrorAsync(
+      () =>
+        handleAdminKnowledgePost(stubPool(), viewer, filesForm(), [
+          file('A.md', 'x'),
+          file('a.md', 'y'),
+        ]),
+      ERROR_CODES.ADMIN_INPUT_INVALID,
+      400,
+      '重複',
+    );
+  });
+
+  it('200KB 超のファイルは AIM-6004(400)', async () => {
+    await expectAppErrorAsync(
+      () =>
+        handleAdminKnowledgePost(stubPool(), viewer, filesForm(), [
+          file('big.md', Buffer.alloc(200 * 1024 + 1, 0x61)),
+        ]),
+      ERROR_CODES.ADMIN_INPUT_INVALID,
+      400,
+      'big.md',
+    );
+  });
+
+  it('UTF-8 でないファイルは AIM-6004(400)', async () => {
+    await expectAppErrorAsync(
+      () =>
+        handleAdminKnowledgePost(stubPool(), viewer, filesForm(), [
+          // Shift_JIS の「あ」(0x82 0xA0)は UTF-8 として不正
+          file('sjis.txt', Buffer.from([0x82, 0xa0])),
+        ]),
+      ERROR_CODES.ADMIN_INPUT_INVALID,
+      400,
+      'UTF-8',
+    );
+  });
+
+  it('内容が空のファイルは AIM-6004(400)', async () => {
+    await expectAppErrorAsync(
+      () => handleAdminKnowledgePost(stubPool(), viewer, filesForm(), [file('empty.md', '  \n')]),
+      ERROR_CODES.ADMIN_INPUT_INVALID,
+      400,
+      'empty.md',
+    );
+  });
+
+  it('格納先(業界)の実在性はマスタで検証する(直接入力と共通の防御)', async () => {
+    await expectAppErrorAsync(
+      () =>
+        handleAdminKnowledgePost(stubPool([], { rowCount: 0 }), viewer, filesForm({ target: 'domain', industry_id: 'ghost' }), [
+          file('a.md', 'x'),
+        ]),
+      ERROR_CODES.ADMIN_INPUT_INVALID,
+      400,
+      '存在しない業界',
+    );
+    expect(mocks.upsertTextFile).not.toHaveBeenCalled();
+  });
+
+  it('2件目以降の保存失敗は継続し、失敗件数とファイル名を PRG で渡す(原則4)', async () => {
+    mocks.upsertTextFile
+      .mockResolvedValueOnce({ fileId: 'f1', action: 'created' })
+      .mockRejectedValueOnce(new Error('drive down'))
+      .mockResolvedValueOnce({ fileId: 'f3', action: 'created' });
+    const location = await handleAdminKnowledgePost(stubPool(), viewer, filesForm(), [
+      file('a.md', 'x'),
+      file('b.md', 'y'),
+      file('c.md', 'z'),
+    ]);
+    expect(location).toBe(
+      `/admin/knowledge?uploaded=1&created=2&updated=0&failed=1&failed_names=${encodeURIComponent('b.md')}`,
+    );
+  });
+
+  it('1件目からの保存失敗は設定不備の可能性が高いためそのままエラー表示にする(v0.6 §2)', async () => {
+    mocks.upsertTextFile.mockRejectedValue(
+      new AppError(ERROR_CODES.DRIVE_WRITE_FAILED, '編集者共有を確認してください', { status: 502 }),
+    );
+    await expectAppErrorAsync(
+      () =>
+        handleAdminKnowledgePost(stubPool(), viewer, filesForm(), [file('a.md', 'x'), file('b.md', 'y')]),
+      ERROR_CODES.DRIVE_WRITE_FAILED,
+      502,
+    );
+    expect(mocks.upsertTextFile).toHaveBeenCalledTimes(1);
   });
 });
