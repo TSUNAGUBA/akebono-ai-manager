@@ -265,4 +265,4 @@ Write-Host "repository secrets 用の設定を $OutputConfigPath に出力しま
 Write-Host "空欄の任意項目(VPC コネクタ等)を必要に応じて埋めた後、以下を実行してください:"
 Write-Host "  ./register-github-secrets.ps1 -Repo $GithubRepo -ConfigPath $OutputConfigPath" -ForegroundColor Yellow
 Write-Host ""
-Write-Host "注意: ナレッジ同期を使う場合は、Drive のナレッジフォルダを $runtimeSa に閲覧者で共有してください。"
+Write-Host "注意: ナレッジ同期を使う場合は、Drive のナレッジフォルダを $runtimeSa に編集者で共有してください(v0.4 のナレッジ管理 UI が投入・削除を書き込むため。同期のみなら閲覧者でも動作します)。"

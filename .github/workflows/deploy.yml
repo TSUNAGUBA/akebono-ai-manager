@@ -257,10 +257,19 @@ jobs:
           DASHBOARD_EXPOSURE: ${{ secrets.DASHBOARD_EXPOSURE }}
           DASHBOARD_ADMIN_DB_ENABLED: ${{ secrets.DASHBOARD_ADMIN_DB_ENABLED }}
           DB_ADMIN_POOL_MAX: ${{ secrets.DB_ADMIN_POOL_MAX }}
+          KNOWLEDGE_DRIVE_FOLDER_ID: ${{ secrets.KNOWLEDGE_DRIVE_FOLDER_ID }}
         run: |
           VPC_FLAGS=()
           if [ -n "$GCP_VPC_CONNECTOR" ]; then
             VPC_FLAGS=(--vpc-connector "$GCP_VPC_CONNECTOR" --vpc-egress all-traffic)
+          fi
+          # ナレッジ管理 UI(v0.4)の「今すぐ同期」用に batch の URL を配線する。
+          # batch は前ステップでデプロイ済み。取得に失敗してもデプロイは止めず、
+          # ボタン非表示(毎日 06:30 の自動同期のみ)で続行する(非ブロッキング)
+          BATCH_URL=$(gcloud run services describe ai-manager-batch \
+            --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format 'value(status.url)' 2>/dev/null || true)
+          if [ -z "$BATCH_URL" ]; then
+            echo "::warning::ai-manager-batch の URL を取得できませんでした。ナレッジ管理の「今すぐ同期」ボタンは表示されません(毎日 06:30 の自動同期には影響なし)"
           fi
           # マスタ管理 UI(v0.3)用の書込ロール接続。GCP 側シークレット
           # (ai-manager-db-master-admin-*)の登録後に有効化する二段構え
@@ -297,6 +306,13 @@ jobs:
           ENV_VARS="GCP_PROJECT_ID=${GCP_PROJECT_ID},GCP_REGION=${GCP_REGION},AUTH_MODE=${AUTH_MODE},DB_POOL_MAX=5${ADMIN_ENV}"
           if [ -n "$DASHBOARD_IAP_AUDIENCE" ]; then
             ENV_VARS="${ENV_VARS},IAP_AUDIENCE=${DASHBOARD_IAP_AUDIENCE}"
+          fi
+          # ナレッジ管理 UI(v0.4)。任意 secret / 取得失敗時は付けない(未設定時は案内表示・ボタン非表示)
+          if [ -n "$KNOWLEDGE_DRIVE_FOLDER_ID" ]; then
+            ENV_VARS="${ENV_VARS},KNOWLEDGE_DRIVE_FOLDER_ID=${KNOWLEDGE_DRIVE_FOLDER_ID}"
+          fi
+          if [ -n "$BATCH_URL" ]; then
+            ENV_VARS="${ENV_VARS},BATCH_URL=${BATCH_URL}"
           fi
           # 認証は IAP(ネットワーク層)+アプリ層検証の多層防御
           gcloud run deploy ai-manager-dashboard \

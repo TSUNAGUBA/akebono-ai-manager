@@ -7,7 +7,7 @@
 いつものチャットに返事をするだけで、日報が自動で完成し、業務知識が即座に手に入り、
 「予想 → 実行 → 振り返り」の思考サイクルが無理なく回り始めます。
 
-- 📘 要件・基本設計: [docs/refference/ai-manager-requirements-design.md](docs/refference/ai-manager-requirements-design.md)(v0.2)+ [v0.3 追補(マスタ管理とナレッジスコープ)](docs/refference/ai-manager-requirements-v0.3-addendum.md)
+- 📘 要件・基本設計: [docs/refference/ai-manager-requirements-design.md](docs/refference/ai-manager-requirements-design.md)(v0.2)+ [v0.3 追補(マスタ管理とナレッジスコープ)](docs/refference/ai-manager-requirements-v0.3-addendum.md)+ [v0.4 追補(ナレッジ管理 UI)](docs/refference/ai-manager-requirements-v0.4-addendum.md)
 - 📗 導入前後の変化(非エンジニア向け): [docs/refference/ai-manager-before-after-guide.md](docs/refference/ai-manager-before-after-guide.md)
 - 📙 Phase 1 実装設計・ADR: [docs/architecture/phase1-implementation.md](docs/architecture/phase1-implementation.md)
 - 🚀 デプロイ設定手順: [docs/operations/deployment-setup.md](docs/operations/deployment-setup.md)
@@ -23,6 +23,7 @@
 | エスカレーション(M6) | AI が確信を持てない事項を管理者へ自動ルーティング |
 | 可視化ダッシュボード(M5) | プロジェクト横断の進捗、タスク負荷、個人の振り返り資産、成長観察(管理者限定)、AI コスト |
 | マスタ管理(v0.3) | 業界・顧客・顧客間関係・関係種別マスタをダッシュボードから管理(管理者限定。要 DB_ADMIN_USER / DB_ADMIN_PASSWORD) |
+| ナレッジ管理(v0.4) | ナレッジ文書の一覧・投入・上書き・削除・即時同期をダッシュボードから実行(管理者限定。SoT は Drive のまま。要フォルダの編集者共有) |
 
 ## アーキテクチャ
 
@@ -36,6 +37,8 @@ flowchart LR
     Browser[ブラウザ+IAP] --> Dash[dashboard<br>Cloud Run]
     GW & Batch -->|Gemini / Embedding| Vertex[Vertex AI]
     Batch -->|ナレッジ同期| Drive[Google Drive]
+    Dash -->|ナレッジ投入・削除| Drive
+    Dash -->|今すぐ同期(OIDC)| Batch
     GW & Batch & Dash -->|SSL 必須・固定IP| RDS[(AWS RDS PostgreSQL<br>ops / dwh / rag)]
 ```
 

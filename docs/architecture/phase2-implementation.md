@@ -11,6 +11,7 @@
 |---|---|---|
 | v0.3 マスタ+ナレッジスコープ | **実装済み** | 業界/顧客×業界/関係種別/顧客間関係の4マスタ(migration 0004)、1〜2ホップのスコープ導出(再帰CTE)、RAG 前置フィルタ、knowledge-sync の業界帰属+マスタ突合 |
 | v0.3 マスタ管理 UI | **実装済み** | 管理者限定 /admin/*(業界・顧客・関係の CRUD、CSRF 二重送信クッキー __Host-、監査ログ、専用書込ロール ai_manager_admin_rw、未構成時は案内表示) |
+| v0.4 ナレッジ管理 UI | **実装済み** | 管理者限定 /admin/knowledge(Drive 文書の一覧+rag 同期状態、共通/業界/顧客への投入・同名上書き・ゴミ箱移動、knowledge-sync の即時起動)。SoT は Drive のまま(UI は投入経路。rag への直接書込はしない)。書込はランタイム SA 自身のトークンで行い、実効権限境界は共有 ACL(v0.4 §2) |
 | M3 タスクオーケストレーション | **実装済み** | 管理者の指示検知(明示プレフィックス確定+flash-lite 分類)→ pro で分解(subtasks/工数/期限/担当案)→ 承認カード → 担当へ DM 配信 → 対話からの進捗自動更新(着手・完了) |
 | M6 異常シグナル検知 | **実装済み** | anomaly-scan バッチ(平日 09:30): 停滞・過負荷・仮説表明率の急落を決定的 SQL+閾値で検知、クールダウン付き起票+管理者通知 |
 | M6 裁定ナレッジ還流 | **実装済み** | エスカレーションの「裁定を記録」→ resolution 保存 → decision_rules として rag へ embedding 付き還流(ADR-11) |
@@ -67,7 +68,9 @@
 
 | 経路 | 保護 |
 |---|---|
-| ブラウザ → dashboard /admin/* | 既存の IAP+role=admin 判定に加え、専用 DB ロール(ai_manager_admin_rw: マスタ4表+顧客のみ書込可)、CSRF(__Host- クッキー+SameSite=Strict)、全書込の監査ログ |
+| ブラウザ → dashboard /admin/* | 既存の IAP+role=admin 判定に加え、専用 DB ロール(ai_manager_admin_rw: マスタ4表+顧客のみ書込可。v0.4 で rag.knowledge_chunks の SELECT のみ追加)、CSRF(__Host- クッキー+SameSite=Strict)、全書込の監査ログ |
+| dashboard → Drive(ナレッジ投入・削除) | ランタイム SA 自身のトークン(scope: drive。DWD 不使用)。SA が書込めるのは「編集者」で共有されたフォルダのみで、実効権限境界は Drive の共有 ACL(v0.4 §2)。削除はゴミ箱移動(復元可能) |
+| dashboard → batch(今すぐ同期) | OIDC ID トークン(audience=batch URL)+Cloud Run IAM(roles/run.invoker)+batch アプリ層の BATCH_INVOKER_SA 照合の多層防御 |
 | batch → 本人カレンダー | ドメイン全体委任(calendar.readonly のみ)。SA キー不発行(IAM signJwt)。委任スコープは Workspace 管理者が制御 |
 | chat-gateway → タスク起票 | 管理者ロールのみ指示可能。承認カードの操作も role=admin を検証。分解結果は status=proposed で人間の承認が必須(AI は配信しない) |
 

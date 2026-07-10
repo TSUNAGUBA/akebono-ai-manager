@@ -13,6 +13,11 @@ export function jstDateString(date: Date = new Date()): string {
   return toJst(date).toISOString().slice(0, 10);
 }
 
+/** JST での日時文字列 'YYYY-MM-DD HH:MM'(ダッシュボードの to_char 表示と同形式) */
+export function jstDateTimeString(date: Date = new Date()): string {
+  return toJst(date).toISOString().slice(0, 16).replace('T', ' ');
+}
+
 /** JST での日付キー YYYYMMDD(dwh.dim_date.date_key と同形式) */
 export function jstDateKey(date: Date = new Date()): number {
   return Number(jstDateString(date).replaceAll('-', ''));

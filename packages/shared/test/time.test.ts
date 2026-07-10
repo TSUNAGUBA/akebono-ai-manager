@@ -4,6 +4,7 @@ import {
   jstDateKey,
   jstDateString,
   jstDateStringDaysAgo,
+  jstDateTimeString,
   jstDayOfWeek,
 } from '../src/time.js';
 
@@ -20,6 +21,11 @@ describe('JST 日付ユーティリティ', () => {
 
   it('YYYYMMDD 形式の date_key を返す', () => {
     expect(jstDateKey(utcEvening)).toBe(20260709);
+  });
+
+  it('JST の日時文字列(YYYY-MM-DD HH:MM)を返す', () => {
+    expect(jstDateTimeString(utcEvening)).toBe('2026-07-09 01:00');
+    expect(jstDateTimeString(utcAfternoon)).toBe('2026-07-08 23:00');
   });
 
   it('JST の曜日を返す(2026-07-09 は木曜)', () => {

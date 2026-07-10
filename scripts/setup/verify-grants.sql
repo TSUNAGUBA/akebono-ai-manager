@@ -46,7 +46,17 @@ FROM (VALUES
      ) AS t(tbl)
 ORDER BY t.tbl;
 
--- ── 3. ai_manager_admin_rw: マスタ管理の対象外テーブルへは一切アクセス不可 ──
+-- ── 3. ai_manager_admin_rw: ナレッジ管理(v0.4)の同期状態表示は読取のみ可 ──
+-- 期待値: can_select = t / can_insert = f / can_update = f / can_delete = f
+-- (ナレッジの SoT は Drive。rag への書込は knowledge-sync ジョブ = ai_manager_app_rw の責務)
+SELECT 'ai_manager_admin_rw' AS role_name,
+       'rag.knowledge_chunks' AS table_name,
+       has_table_privilege('ai_manager_admin_rw', 'rag.knowledge_chunks', 'SELECT') AS can_select,
+       has_table_privilege('ai_manager_admin_rw', 'rag.knowledge_chunks', 'INSERT') AS can_insert,
+       has_table_privilege('ai_manager_admin_rw', 'rag.knowledge_chunks', 'UPDATE') AS can_update,
+       has_table_privilege('ai_manager_admin_rw', 'rag.knowledge_chunks', 'DELETE') AS can_delete;
+
+-- ── 4. ai_manager_admin_rw: マスタ管理の対象外テーブルへは一切アクセス不可 ──
 -- 期待値: 全行で can_select = f / can_insert = f / can_update = f / can_delete = f
 -- (ops.users はマスタ管理ページが参照しないため SELECT も付与しない。
 --  認証時のロール解決は ai_manager_dashboard_ro 側のプールで行う)
@@ -60,7 +70,6 @@ FROM (VALUES
         ('ops.users'),
         ('ops.tasks'),
         ('ops.dialogues'),
-        ('ops.escalations'),
-        ('rag.knowledge_chunks')
+        ('ops.escalations')
      ) AS t(tbl)
 ORDER BY t.tbl;
