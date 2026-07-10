@@ -169,7 +169,10 @@ async function findChildByName(
     `name = '${escapeQueryValue(name)}'`,
     'trashed = false',
   ];
+  // foldersOnly=false は「ファイル探し」なので同名フォルダを誤ヒットさせない
+  // (フォルダに media PATCH すると Drive 側エラーになるため)
   if (options.foldersOnly) conditions.push(`mimeType = '${FOLDER_MIME}'`);
+  else conditions.push(`mimeType != '${FOLDER_MIME}'`);
   const params = new URLSearchParams({
     q: conditions.join(' and '),
     fields: 'files(id)',

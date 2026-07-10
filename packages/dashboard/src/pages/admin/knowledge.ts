@@ -294,7 +294,7 @@ export async function renderAdminKnowledge(pool: pg.Pool, ctx: AdminPageContext)
       </label>
     </div>
     <label class="field">本文(Markdown / テキスト、最大 200KB)
-      <textarea name="content" required maxlength="204800" style="min-height:180px"
+      <textarea name="content" required maxlength="65000" style="min-height:180px"
                 placeholder="ここに文書の本文を入力します"></textarea>
     </label>
     <p class="form-help">
@@ -392,7 +392,7 @@ export async function handleAdminKnowledgePost(
     let customerId: string | null = null;
     if (target === 'domain') {
       industryId = requireRef(form, 'industry_id', '業界');
-      const found = await query(pool, `SELECT 1 FROM ops.industries WHERE industry_id = $1`, [
+      const found = await query(pool, `SELECT 1 FROM ops.industries WHERE industry_id = $1 AND active`, [
         industryId,
       ]);
       if ((found.rowCount ?? 0) === 0) {
@@ -433,6 +433,12 @@ export async function handleAdminKnowledgePost(
     const fileId = (form.get('file_id') ?? '').trim();
     if (!DRIVE_FILE_ID_PATTERN.test(fileId)) {
       throw invalidInput('ファイルIDが不正です。ページを再読み込みしてやり直してください');
+    }
+    // 削除対象がナレッジフォルダ配下であることを検証する
+    // (SA に共有された他ファイルの ID を偽装 POST されてもゴミ箱移動させない)
+    const files = await listFilesRecursive(folderId);
+    if (!files.some((f) => f.id === fileId)) {
+      throw invalidInput('ナレッジフォルダ配下にないファイルは削除できません。ページを再読み込みしてやり直してください');
     }
     // 監査ログ用の補助情報。検証で削除を止めない(長すぎる名前は切り詰める)
     const fileName = (form.get('file_name') ?? '').trim().slice(0, 500) || null;
