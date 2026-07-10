@@ -456,10 +456,19 @@ export async function handleAdminKnowledgePost(
     const seen = new Set<string>();
     const validated: Array<{ fileName: string; content: string; contentBytes: number }> = [];
     for (const file of files) {
+      // OS 由来の大文字・前後空白を含むファイル名を規約(小文字)へ寄せる
+      // (trim は normalizeKnowledgeFileName と同じ扱い — 拡張子判定の前に行う)
+      const lowered = file.fileName.trim().toLowerCase();
+      // 「.md 自動付与」は直接入力の入力補助であり、実ファイル名を持つアップロードには
+      // 適用しない(data.json → data.json.md のような対象外形式の素通り・無断改名を防ぐ — v0.6 §1)
+      if (!/\.(md|txt)$/.test(lowered)) {
+        throw invalidInput(
+          `対応していない形式です: ${file.fileName.slice(0, 128)}(拡張子 .md / .txt のファイルのみ投入できます)`,
+        );
+      }
       let fileName: string;
       try {
-        // OS 由来の大文字を含むファイル名を規約(小文字)へ寄せる
-        fileName = normalizeKnowledgeFileName(file.fileName.toLowerCase());
+        fileName = normalizeKnowledgeFileName(lowered);
       } catch {
         throw invalidInput(
           `ファイル名が規約外です: ${file.fileName.slice(0, 128)}(半角の小文字英数字・ドット・ハイフン・アンダースコア+拡張子 .md / .txt)`,
