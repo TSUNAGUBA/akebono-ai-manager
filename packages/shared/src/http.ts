@@ -57,6 +57,26 @@ export async function readJsonBody<T = unknown>(req: http.IncomingMessage): Prom
 }
 
 /**
+ * 任意の JSON ボディを読む。空ボディは undefined を返す(ボディ省略可のエンドポイント用。
+ * 例: batch の /jobs/{name} — Cloud Scheduler はボディなしで POST する)。
+ * 不正 JSON・サイズ超過は readJsonBody と同じく AIM-3103。
+ */
+export async function readOptionalJsonBody<T = unknown>(
+  req: http.IncomingMessage,
+): Promise<T | undefined> {
+  const raw = await readRawBody(req);
+  if (raw.trim() === '') return undefined;
+  try {
+    return JSON.parse(raw) as T;
+  } catch (err) {
+    throw new AppError(ERROR_CODES.REQUEST_BODY_INVALID, 'リクエストボディが JSON として不正です', {
+      status: 400,
+      cause: err,
+    });
+  }
+}
+
+/**
  * フォームボディ(application/x-www-form-urlencoded)を読む。
  * 空ボディは空の URLSearchParams を返す(必須項目の検証は呼び出し側の責務)。
  */

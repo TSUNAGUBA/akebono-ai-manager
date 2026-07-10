@@ -1,10 +1,12 @@
 import {
+  ADHOC_CHECKIN_DIALOGUE_INSTRUCTION,
   ADHOC_QA_INSTRUCTION,
   ADHOC_QA_RESPONSE_SCHEMA,
   classifyMessage,
   detectTaskInstruction,
   EVENING_DIALOGUE_INSTRUCTION,
   EVENING_RESPONSE_SCHEMA,
+  generateContent,
   generateJson,
   jstDateString,
   logger,
@@ -153,6 +155,33 @@ async function continueMorningDialogue(
     }
   }
   return { text: value.reply };
+}
+
+/**
+ * 状況確認(管理者発火・v0.5)の継続: 仮説形成・構造化出力は要求しない軽量な共感的深掘り。
+ * 締め(2〜3往復)はプロンプトの指示+findOpenDialogue のターン数上限で自然にクローズする。
+ */
+async function continueAdhocCheckinDialogue(
+  pool: pg.Pool,
+  user: OpsUser,
+  dialogue: DialogueRow,
+  text: string,
+): Promise<ChatAppMessage> {
+  const tasks = await openTasksSummary(pool, user.user_id);
+  // 構造化抽出が不要な軽量対話のため、pro ではなく flash のプレーンテキスト生成で応答する
+  const result = await generateContent({
+    tier: 'flash',
+    system: `${SYSTEM_PROMPT}\n\n${ADHOC_CHECKIN_DIALOGUE_INSTRUCTION}\n\n## 本人のタスク状況\n${tasks}`,
+    messages: turnsToMessages(dialogue.turns, text),
+  });
+
+  await appendTurns(pool, dialogue, [nowTurn('user', text), nowTurn('ai', result.text)], {
+    modelUsed: result.model,
+    inputTokens: result.inputTokens,
+    outputTokens: result.outputTokens,
+    costUsd: result.costUsd,
+  });
+  return { text: result.text };
 }
 
 interface EveningLlmResponse {
@@ -587,7 +616,7 @@ async function handleAwaitingResolutionMessage(
 
 /**
  * MESSAGE イベントのハンドラ。
- * 優先順: 裁定の受領(管理者) → 提案理由の受領 → 進行中の朝夕対話の継続
+ * 優先順: 裁定の受領(管理者) → 提案理由の受領 → 進行中の朝夕対話・状況確認の継続
  *        → タスク指示の検知(管理者) → 完了申告の検知 → 随時 QA
  * (進行中対話の継続をタスク指示検知より先に評価し、朝夕対話の途中のメッセージが
  *  タスク起票に横取りされないようにする)
@@ -621,12 +650,16 @@ export async function handleMessage(
     };
   }
 
-  // 進行中の朝夕対話の継続を最優先で評価する(タスク指示検知による横取り防止)
+  // 進行中の朝夕対話・状況確認の継続を最優先で評価する(タスク指示検知による横取り防止)
   const open = await findOpenDialogue(pool, user.user_id, jstDateString());
   if (open !== undefined) {
-    return open.dialogue_type === 'morning_checkin'
-      ? continueMorningDialogue(pool, user, open, text)
-      : continueEveningDialogue(pool, user, open, text);
+    if (open.dialogue_type === 'morning_checkin') {
+      return continueMorningDialogue(pool, user, open, text);
+    }
+    if (open.dialogue_type === 'adhoc_checkin') {
+      return continueAdhocCheckinDialogue(pool, user, open, text);
+    }
+    return continueEveningDialogue(pool, user, open, text);
   }
 
   // 管理者のタスク指示(M3)。ルールベース先行+曖昧な場合のみ flash-lite で分類

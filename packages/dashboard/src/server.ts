@@ -19,6 +19,7 @@ import { renderOverview } from './pages/overview.js';
 import { renderProjects } from './pages/projects.js';
 import { renderWorkload } from './pages/workload.js';
 import { renderAdminUnconfigured, type AdminPageContext } from './pages/admin/common.js';
+import { handleAdminCheckinPost, renderAdminCheckin } from './pages/admin/checkin.js';
 import { handleAdminCustomersPost, renderAdminCustomers } from './pages/admin/customers.js';
 import { handleAdminIndustriesPost, renderAdminIndustries } from './pages/admin/industries.js';
 import { handleAdminKnowledgePost, renderAdminKnowledge } from './pages/admin/knowledge.js';
@@ -85,8 +86,15 @@ interface AdminPageDef {
   path: string;
   title: string;
   description: string;
-  render: (adminPool: pg.Pool, ctx: AdminPageContext) => Promise<Raw>;
-  handlePost: (adminPool: pg.Pool, viewer: Viewer, form: URLSearchParams) => Promise<string>;
+  /**
+   * ページが使う DB プール。既定はマスタ管理用の第2プール(ai_manager_admin_rw)。
+   * 'readonly' は閲覧用プール(ai_manager_dashboard_ro)で完結するページ
+   * (例: /admin/checkin — 書込はせず batch を OIDC で起動するだけ)に指定する。
+   * readonly のページは DB_ADMIN_USER 未構成でも利用できる。
+   */
+  pool?: 'admin' | 'readonly';
+  render: (pool: pg.Pool, ctx: AdminPageContext) => Promise<Raw>;
+  handlePost: (pool: pg.Pool, viewer: Viewer, form: URLSearchParams) => Promise<string>;
 }
 
 const ADMIN_PAGES: AdminPageDef[] = [
@@ -117,6 +125,15 @@ const ADMIN_PAGES: AdminPageDef[] = [
     description: 'ナレッジ文書の一覧・投入・削除と即時同期(SoT は Drive。検索への反映は同期後)',
     render: renderAdminKnowledge,
     handlePost: handleAdminKnowledgePost,
+  },
+  {
+    path: '/admin/checkin',
+    title: '状況確認',
+    description:
+      'メンバーへの進捗・状況の問いかけ(管理者発火)と当日の応答状況(配信は batch 経由。返信は対話として記録)',
+    pool: 'readonly',
+    render: renderAdminCheckin,
+    handlePost: handleAdminCheckinPost,
   },
 ];
 
@@ -203,21 +220,21 @@ function renderAdminShell(def: AdminPageDef, viewer: Viewer, body: Raw): string 
   });
 }
 
-function adminGetRoute(pool: pg.Pool, adminPool: pg.Pool | undefined, def: AdminPageDef): Route {
+function adminGetRoute(pool: pg.Pool, pagePool: pg.Pool | undefined, def: AdminPageDef): Route {
   return {
     method: 'GET',
     path: def.path,
     handler: async (req, res, ctx) => {
       const viewer = await authenticateAdmin(req, res, pool);
       if (viewer === undefined) return;
-      if (adminPool === undefined) {
+      if (pagePool === undefined) {
         // グレースフルデグラデーション: 管理用接続が未構成でも閲覧機能は影響を受けない
         sendHtml(res, 200, renderAdminShell(def, viewer, renderAdminUnconfigured()));
         return;
       }
       try {
         const csrfToken = ensureCsrfToken(req, res);
-        const body = await def.render(adminPool, { csrfToken, url: ctx.url });
+        const body = await def.render(pagePool, { csrfToken, url: ctx.url });
         sendHtml(res, 200, renderAdminShell(def, viewer, body));
       } catch (err) {
         respondRenderFailure(res, def.path, err);
@@ -226,14 +243,14 @@ function adminGetRoute(pool: pg.Pool, adminPool: pg.Pool | undefined, def: Admin
   };
 }
 
-function adminPostRoute(pool: pg.Pool, adminPool: pg.Pool | undefined, def: AdminPageDef): Route {
+function adminPostRoute(pool: pg.Pool, pagePool: pg.Pool | undefined, def: AdminPageDef): Route {
   return {
     method: 'POST',
     path: def.path,
     handler: async (req, res, ctx) => {
       const viewer = await authenticateAdmin(req, res, pool);
       if (viewer === undefined) return;
-      if (adminPool === undefined) {
+      if (pagePool === undefined) {
         logger.warn('マスタ管理が未構成の状態で書込リクエストを受信しました', {
           errorCode: ERROR_CODES.ADMIN_DB_NOT_CONFIGURED,
           path: def.path,
@@ -266,7 +283,7 @@ function adminPostRoute(pool: pg.Pool, adminPool: pg.Pool | undefined, def: Admi
       }
 
       try {
-        const location = await def.handlePost(adminPool, viewer, form);
+        const location = await def.handlePost(pagePool, viewer, form);
         // PRG パターン: 再読み込みによる二重送信を防ぐ
         res.writeHead(303, { location });
         res.end();
@@ -281,7 +298,7 @@ function adminPostRoute(pool: pg.Pool, adminPool: pg.Pool | undefined, def: Admi
           });
           try {
             const csrfToken = ensureCsrfToken(req, res);
-            const body = await def.render(adminPool, {
+            const body = await def.render(pagePool, {
               csrfToken,
               url: ctx.url,
               errorMessage: err.message,
@@ -318,10 +335,11 @@ export function createDashboardServer(pool: pg.Pool, adminPool?: pg.Pool): http.
       },
     },
     ...PAGES.map((def) => pageRoute(pool, def)),
-    ...ADMIN_PAGES.flatMap((def) => [
-      adminGetRoute(pool, adminPool, def),
-      adminPostRoute(pool, adminPool, def),
-    ]),
+    ...ADMIN_PAGES.flatMap((def) => {
+      // readonly 指定のページは閲覧用プールで完結する(DB_ADMIN_USER 未構成でも利用可)
+      const pagePool = def.pool === 'readonly' ? pool : adminPool;
+      return [adminGetRoute(pool, pagePool, def), adminPostRoute(pool, pagePool, def)];
+    }),
   ];
   return createAppServer(routes);
 }

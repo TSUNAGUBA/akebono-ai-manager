@@ -18,6 +18,7 @@ export function adminTabs(activePath: string): Raw {
     { path: '/admin/customers', label: '顧客' },
     { path: '/admin/relations', label: '顧客間関係' },
     { path: '/admin/knowledge', label: 'ナレッジ' },
+    { path: '/admin/checkin', label: '状況確認' },
   ];
   const links = tabs
     .map(

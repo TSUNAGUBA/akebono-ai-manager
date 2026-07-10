@@ -1,4 +1,4 @@
-import { AppError, ERROR_CODES, query } from '@ai-manager/shared';
+import { ADHOC_CHECKIN_MAX_TURNS, AppError, ERROR_CODES, query } from '@ai-manager/shared';
 import type pg from 'pg';
 import { formatOpenTasks, listOpenTasks } from './tasks.js';
 
@@ -27,6 +27,10 @@ const DIALOGUE_COLUMNS =
 /**
  * 当日(JST)の「未完了の対話」を探す。
  * 朝の問答は hypothesis 未確定、夕の振り返りは review 未確定のものが対象。
+ * 状況確認(adhoc_checkin・v0.5)は構造化された完了マーカーを持たない軽量対話のため、
+ * ターン数上限(ADHOC_CHECKIN_MAX_TURNS = 初回問いかけ+3往復)未満の間だけ
+ * 「返信待ち」として扱う(プロンプト側が2〜3往復での自然な締めを指示し、
+ * 上限は無関係なメッセージを取り込み続けないための保険)。
  */
 export async function findOpenDialogue(
   pool: pg.Pool,
@@ -41,7 +45,8 @@ export async function findOpenDialogue(
        AND created_at >= ($2::date::timestamp AT TIME ZONE 'Asia/Tokyo')
        AND created_at <  (($2::date + 1)::timestamp AT TIME ZONE 'Asia/Tokyo')
        AND ((dialogue_type = 'morning_checkin' AND hypothesis IS NULL)
-         OR (dialogue_type = 'completion_review' AND review IS NULL))
+         OR (dialogue_type = 'completion_review' AND review IS NULL)
+         OR (dialogue_type = 'adhoc_checkin' AND jsonb_array_length(turns) < ${ADHOC_CHECKIN_MAX_TURNS}))
      ORDER BY created_at DESC
      LIMIT 1`,
     [userId, jstDate],
@@ -72,7 +77,13 @@ export async function findMorningDialogue(
 
 export interface CreateDialogueInput {
   userId: string;
-  dialogueType: 'morning_checkin' | 'completion_review' | 'adhoc_qa' | 'task_instruction' | 'escalation';
+  dialogueType:
+    | 'morning_checkin'
+    | 'completion_review'
+    | 'adhoc_qa'
+    | 'task_instruction'
+    | 'escalation'
+    | 'adhoc_checkin';
   turns: DialogueTurn[];
   taskId?: string | null;
   projectId?: string | null;
