@@ -229,7 +229,8 @@ function adminGetRoute(pool: pg.Pool, pagePool: pg.Pool | undefined, def: AdminP
       if (viewer === undefined) return;
       if (pagePool === undefined) {
         // グレースフルデグラデーション: 管理用接続が未構成でも閲覧機能は影響を受けない
-        sendHtml(res, 200, renderAdminShell(def, viewer, renderAdminUnconfigured()));
+        // (タブ付きで描画し、未構成でも使える readonly ページへの導線を残す)
+        sendHtml(res, 200, renderAdminShell(def, viewer, renderAdminUnconfigured(def.path)));
         return;
       }
       try {
@@ -256,7 +257,7 @@ function adminPostRoute(pool: pg.Pool, pagePool: pg.Pool | undefined, def: Admin
           path: def.path,
           operator: viewer.email,
         });
-        sendHtml(res, 503, renderAdminShell(def, viewer, renderAdminUnconfigured()));
+        sendHtml(res, 503, renderAdminShell(def, viewer, renderAdminUnconfigured(def.path)));
         return;
       }
 

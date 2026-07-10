@@ -182,6 +182,43 @@ describe('runAdhocCheckin(管理者発火の状況確認)', () => {
     const summary = await runAdhocCheckin(pool, { userId: 'member1' });
 
     expect(summary).toEqual({ sent: 0, skipped: 0, failed: 1 });
-    expect(findCall(calls, 'SET turns = turns - -1')?.params).toEqual(['77']);
+    const cleanup = findCall(calls, 'SET turns = turns - -1');
+    expect(cleanup?.params[0]).toBe('77');
+    // 補償削除は「末尾が追記した nudge のまま」の場合に限定する(本人の返信の誤削除防止)。
+    // 条件は追記した ts と content の一致で判定する
+    expect(cleanup?.text).toContain(`turns->-1->>'ts' = $2`);
+    expect(cleanup?.text).toContain(`turns->-1->>'content' = $3`);
+    const appended = findCall(calls, 'SET turns = turns ||');
+    const appendedTurn = (JSON.parse(String(appended?.params[1])) as Array<{ content: string; ts: string }>)[0];
+    expect(cleanup?.params[1]).toBe(appendedTurn?.ts);
+    expect(cleanup?.params[2]).toBe(appendedTurn?.content);
+  });
+
+  it('朝の問いかけに応答中(open+本人の返信あり)のメンバーはスキップする(対話の横取り防止)', async () => {
+    const { pool, calls } = createMockPool((text, params) => {
+      if (text.includes(`dialogue_type = 'morning_checkin' AND hypothesis IS NULL`)) {
+        return { rows: [{ '?column?': 1 }] };
+      }
+      return baseResponder(text, params);
+    });
+    const summary = await runAdhocCheckin(pool, { userId: 'member1' });
+
+    expect(summary).toEqual({ sent: 0, skipped: 1, failed: 0 });
+    expect(findCall(calls, 'INSERT INTO ops.dialogues')).toBeUndefined();
+    expect(mocks.generateContent).not.toHaveBeenCalled();
+    expect(mocks.sendChatMessage).not.toHaveBeenCalled();
+  });
+
+  it('応答中の判定は「本人の返信が付いた open な朝/夕対話」のみを条件にする(未応答者には送信できる)', async () => {
+    const { pool, calls } = createMockPool(baseResponder);
+    const summary = await runAdhocCheckin(pool, { userId: 'member1' });
+
+    expect(summary).toEqual({ sent: 1, skipped: 0, failed: 0 });
+    const midCheck = findCall(calls, `dialogue_type = 'morning_checkin' AND hypothesis IS NULL`);
+    // 夕の振り返り(review 未確定)も対象で、本人の返信(role=user)の存在を必須条件にする
+    expect(midCheck?.text).toContain(`dialogue_type = 'completion_review' AND review IS NULL`);
+    expect(midCheck?.text).toContain(`turn->>'role' = 'user'`);
+    // 判定は配信(INSERT・Chat 送信)より先に行う
+    expect(mocks.sendChatMessage).toHaveBeenCalledTimes(1);
   });
 });

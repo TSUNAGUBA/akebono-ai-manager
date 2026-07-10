@@ -15,6 +15,7 @@ vi.mock('@ai-manager/shared', async (importOriginal) => {
 
 // vi.mock 適用後に読み込む(モック済みの shared を参照させる)
 const { handleAdminCheckinPost, renderAdminCheckin } = await import('../src/pages/admin/checkin.js');
+const { createDashboardServer } = await import('../src/server.js');
 
 const viewer: Viewer = { userId: 'u1', displayName: 'テスト', email: 't@example.com', role: 'admin' };
 const VALID_TOKEN = 'a'.repeat(64);
@@ -342,5 +343,43 @@ describe('状況確認の送信ハンドラ(POST)', () => {
       ERROR_CODES.ADMIN_INPUT_INVALID,
       400,
     );
+  });
+});
+
+describe('/admin/checkin のアクセス制御(HTTP 統合)', () => {
+  it('member ロールは GET / POST とも 403 になる(受け入れ基準3)', async () => {
+    const prevAuthMode = process.env['AUTH_MODE'];
+    process.env['AUTH_MODE'] = 'header';
+    // 認証(ops.users 照会)には常に member を返すスタブを使う
+    const usersPool = {
+      query: () =>
+        Promise.resolve({
+          rows: [{ user_id: 'm1', display_name: 'メンバー', email: 'm@example.com', role: 'member' }],
+          rowCount: 1,
+        }),
+    } as unknown as pg.Pool;
+    // /admin/checkin は readonly プールで動く(adminPool 不要)からこそ、
+    // ロールのガードがルーティング層で確実に効くことをサーバーレベルで検証する
+    const server = createDashboardServer(usersPool);
+    await new Promise<void>((resolve) => server.listen(0, resolve));
+    const { port } = server.address() as import('node:net').AddressInfo;
+    try {
+      for (const method of ['GET', 'POST'] as const) {
+        const res = await fetch(`http://127.0.0.1:${port}/admin/checkin`, {
+          method,
+          headers: {
+            'x-goog-authenticated-user-email': 'accounts.google.com:m@example.com',
+            ...(method === 'POST' ? { 'content-type': 'application/x-www-form-urlencoded' } : {}),
+          },
+          body: method === 'POST' ? 'action=send_all' : undefined,
+        });
+        expect(res.status, `${method} /admin/checkin`).toBe(403);
+        expect(await res.text()).toContain('アクセスできません');
+      }
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      if (prevAuthMode === undefined) delete process.env['AUTH_MODE'];
+      else process.env['AUTH_MODE'] = prevAuthMode;
+    }
   });
 });

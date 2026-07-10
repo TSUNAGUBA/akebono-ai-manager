@@ -52,6 +52,8 @@ interface MemberRow {
  *   対話が分裂すると返信の帰属(findOpenDialogue)が曖昧になるため
  * - 文面の冒頭に管理者発火であることを示す固定プレフィックスをコード側で必ず付与する
  *   (LLM 出力・フォールバック・追い問いかけの全経路)
+ * - 朝の問いかけ・完了時の振り返りに応答中のメンバーはスキップする
+ *   (対話の横取り防止 — v0.5 §2。詳細はループ内のコメント参照)
  *
  * 非ブロッキング: 個別メンバーの失敗は記録して次のメンバーへ進む(原則4)。
  */
@@ -88,6 +90,33 @@ export async function runAdhocCheckin(
     try {
       if (member.chat_space_id === null) {
         logger.warn('DM スペース未登録のためスキップ(本人が Chat アプリに一度話しかけると登録されます)', {
+          userId: member.user_id,
+        });
+        summary.skipped += 1;
+        continue;
+      }
+
+      // 朝の問いかけ・完了時の振り返りに応答中(open な対話に本人の返信が付いている)の
+      // メンバーはスキップする(v0.5 §2)。返信の帰属(findOpenDialogue)は当日の最新の
+      // open 対話に決まるため、途中で状況確認を差し込むと本人の続きの返信が状況確認側に
+      // 吸収され、仮説形成(M2)のフローが中断する。まだ返信が付いていない「未応答」の
+      // メンバーには通常どおり送信できる(未応答者への問いかけが本機能の主目的)
+      const midDialogue = await query(
+        pool,
+        `SELECT 1 FROM ops.dialogues
+         WHERE user_id = $1
+           AND created_at >= ($2::date::timestamp AT TIME ZONE 'Asia/Tokyo')
+           AND created_at <  (($2::date + 1)::timestamp AT TIME ZONE 'Asia/Tokyo')
+           AND ((dialogue_type = 'morning_checkin' AND hypothesis IS NULL)
+             OR (dialogue_type = 'completion_review' AND review IS NULL))
+           AND EXISTS (
+             SELECT 1 FROM jsonb_array_elements(turns) AS turn WHERE turn->>'role' = 'user'
+           )
+         LIMIT 1`,
+        [member.user_id, today],
+      );
+      if (midDialogue.rows.length > 0) {
+        logger.info('朝の問いかけ・振り返りに応答中のためスキップします(対話の横取り防止)', {
           userId: member.user_id,
         });
         summary.skipped += 1;
@@ -206,18 +235,25 @@ export async function runAdhocCheckin(
  */
 async function sendNudge(pool: pg.Pool, chatSpaceId: string, dialogueId: string): Promise<void> {
   const nudgeText = `${ADHOC_CHECKIN_PREFIX}\n${NUDGE_MESSAGE}`;
+  const nudgeTs = new Date().toISOString();
   await query(
     pool,
     `UPDATE ops.dialogues SET turns = turns || $2::jsonb WHERE dialogue_id = $1`,
-    [dialogueId, JSON.stringify([{ role: 'ai', content: nudgeText, ts: new Date().toISOString() }])],
+    [dialogueId, JSON.stringify([{ role: 'ai', content: nudgeText, ts: nudgeTs }])],
   );
   try {
     await sendChatMessage(chatSpaceId, { text: nudgeText });
   } catch (sendErr) {
-    // jsonb の負数インデックスは末尾からの位置(-1 = 直前に追記したターン)
-    await query(pool, `UPDATE ops.dialogues SET turns = turns - -1 WHERE dialogue_id = $1`, [
-      dialogueId,
-    ]).catch((cleanupErr: unknown) => {
+    // 補償削除は「末尾(-1)が追記した nudge のまま」の場合に限定する。open な対話には
+    // 本人がいつでも返信し得るため、追記からここまでの間に chat-gateway がターンを
+    // 追記していた場合、無条件の末尾削除は本人の返信を誤って消す。条件不成立時は
+    // 未配信の nudge ターンが1件残るが、対話ログの欠損より許容できる
+    await query(
+      pool,
+      `UPDATE ops.dialogues SET turns = turns - -1
+       WHERE dialogue_id = $1 AND turns->-1->>'ts' = $2 AND turns->-1->>'content' = $3`,
+      [dialogueId, nudgeTs, nudgeText],
+    ).catch((cleanupErr: unknown) => {
       logger.error('配信失敗後の追い問いかけターン削除に失敗しました', cleanupErr, { dialogueId });
     });
     throw sendErr;

@@ -1,16 +1,10 @@
-import {
-  ERROR_CODES,
-  getIdTokenFor,
-  jstDateString,
-  logger,
-  optionalEnv,
-  query,
-} from '@ai-manager/shared';
+import { ERROR_CODES, jstDateString, logger, optionalEnv, query } from '@ai-manager/shared';
 import type pg from 'pg';
 import { badge, responsiveTable, section } from '../../render/components.js';
 import { h, html, raw, type Raw } from '../../render/html.js';
 import type { Viewer } from '../../render/layout.js';
-import { auditLog, invalidInput, requireRef } from '../../admin/form.js';
+import { invalidInput, requireRef } from '../../admin/form.js';
+import { triggerBatchJob } from './batch-trigger.js';
 import { adminTabs, csrfField, flashMessages, type AdminPageContext } from './common.js';
 
 /**
@@ -56,7 +50,7 @@ function checkinFlash(ctx: AdminPageContext): Raw {
     const failed = count('failed');
     const tone = failed === '0' ? 'ok' : 'error';
     return raw(
-      `<div class="alert ${tone}">状況確認を送信しました(送信 ${count('sent')} 件・スキップ ${count('skipped')} 件・失敗 ${count('failed')} 件)。DM 未登録のメンバーはスキップされます</div>`,
+      `<div class="alert ${tone}">状況確認を送信しました(送信 ${count('sent')} 件・スキップ ${count('skipped')} 件・失敗 ${count('failed')} 件)。DM 未登録、または朝の問いかけ・振り返りに応答中のメンバーはスキップされます</div>`,
     );
   }
   const errorKey = params.get('checkin_error');
@@ -181,7 +175,7 @@ export async function renderAdminCheckin(pool: pg.Pool, ctx: AdminPageContext): 
             <input type="hidden" name="action" value="send_all">
             <button class="btn" type="submit">全員に問いかける</button>
           </form>
-          <span class="form-help">DM 未登録のメンバーはスキップされ、結果に件数が表示されます</span>
+          <span class="form-help">DM 未登録のメンバーと、朝の問いかけ・振り返りに応答中(仮説形成の途中)のメンバーはスキップされ、結果に件数が表示されます</span>
         </div>`;
 
   return html`
@@ -194,66 +188,6 @@ export async function renderAdminCheckin(pool: pg.Pool, ctx: AdminPageContext): 
       '問いかけは本人の DM に届き(冒頭に管理者発火であることを明示)、返信は対話として ops.dialogues に記録されます。返信の督促は行いません(返信状況は本ページと概要ページで確認)',
     )}
   `;
-}
-
-/** 送信: batch の /jobs/adhoc-checkin を OIDC ID トークン付きで起動する(「今すぐ同期」と同じパターン)。 */
-async function triggerAdhocCheckin(
-  batchUrl: string,
-  viewer: Viewer,
-  userId: string | undefined,
-): Promise<string> {
-  // batch 側の audience 検証(https://{host})と一致させるため末尾スラッシュを正規化する
-  const audience = batchUrl.replace(/\/+$/, '');
-  const jobUrl = `${audience}/jobs/adhoc-checkin`;
-  let res: Response;
-  try {
-    const token = await getIdTokenFor(audience);
-    res = await fetch(jobUrl, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-      body: JSON.stringify(userId === undefined ? {} : { userId }),
-      signal: AbortSignal.timeout(CHECKIN_WAIT_MS),
-    });
-  } catch (err) {
-    if (typeof err === 'object' && err !== null && (err as { name?: unknown }).name === 'TimeoutError') {
-      logger.warn('状況確認の応答待ちがタイムアウトしました(配信は継続している可能性があります)', {
-        errorCode: ERROR_CODES.CHECKIN_TRIGGER_FAILED,
-        operator: viewer.email,
-        target: userId ?? 'all-members',
-      });
-      return `${PATH}?checkin_error=timeout`;
-    }
-    logger.error('状況確認の起動に失敗しました', err, {
-      errorCode: ERROR_CODES.CHECKIN_TRIGGER_FAILED,
-      operator: viewer.email,
-      target: userId ?? 'all-members',
-    });
-    return `${PATH}?checkin_error=request`;
-  }
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    logger.warn('状況確認がエラー応答を返しました', {
-      errorCode: ERROR_CODES.CHECKIN_TRIGGER_FAILED,
-      status: res.status,
-      body: body.slice(0, 300),
-      operator: viewer.email,
-      target: userId ?? 'all-members',
-    });
-    return `${PATH}?checkin_error=request`;
-  }
-  const summary = (await res.json().catch(() => ({}))) as {
-    sent?: unknown;
-    skipped?: unknown;
-    failed?: unknown;
-  };
-  const count = (value: unknown): number =>
-    typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : 0;
-  const sent = count(summary.sent);
-  const skipped = count(summary.skipped);
-  const failed = count(summary.failed);
-  // 監査ログ(v0.5 §2: 誰が・誰に・いつ。「いつ」はログの time フィールド)
-  auditLog(viewer, 'checkin.send', { target: userId ?? 'all-members' }, { sent, skipped, failed });
-  return `${PATH}?checkin=1&sent=${sent}&skipped=${skipped}&failed=${failed}`;
 }
 
 /** 状況確認の送信(個別/全員)。成功時はリダイレクト先を返す(PRG パターン: 二重送信防止 — v0.5 §2)。 */
@@ -286,5 +220,20 @@ export async function handleAdminCheckinPost(
       throw invalidInput('対象メンバーが見つかりません。ページを再読み込みしてやり直してください');
     }
   }
-  return triggerAdhocCheckin(batchUrl, viewer, userId);
+  // batch の /jobs/adhoc-checkin を起動する(「今すぐ同期」と共通のヘルパー)。
+  // 監査ログは v0.5 §2(誰が・誰に・いつ)をヘルパー側で記録する
+  return triggerBatchJob({
+    batchUrl,
+    jobName: 'adhoc-checkin',
+    jobLabel: '状況確認',
+    viewer,
+    waitMs: CHECKIN_WAIT_MS,
+    errorCode: ERROR_CODES.CHECKIN_TRIGGER_FAILED,
+    body: userId === undefined ? {} : { userId },
+    auditAction: 'checkin.send',
+    auditDetails: { target: userId ?? 'all-members' },
+    redirectBase: PATH,
+    successParam: 'checkin',
+    errorParam: 'checkin_error',
+  });
 }

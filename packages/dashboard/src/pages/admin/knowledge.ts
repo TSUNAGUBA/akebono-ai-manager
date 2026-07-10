@@ -1,7 +1,6 @@
 import {
   ensureSubfolder,
   ERROR_CODES,
-  getIdTokenFor,
   jstDateTimeString,
   listFilesRecursive,
   logger,
@@ -16,6 +15,7 @@ import { badge, responsiveTable, section } from '../../render/components.js';
 import { h, html, raw, type Raw } from '../../render/html.js';
 import type { Viewer } from '../../render/layout.js';
 import { auditLog, invalidInput, requireRef } from '../../admin/form.js';
+import { triggerBatchJob } from './batch-trigger.js';
 import { adminTabs, csrfField, flashMessages, type AdminPageContext } from './common.js';
 
 /**
@@ -317,57 +317,6 @@ export async function renderAdminKnowledge(pool: pg.Pool, ctx: AdminPageContext)
   `;
 }
 
-/** 「今すぐ同期」: batch の /jobs/knowledge-sync を OIDC ID トークン付きで起動する。 */
-async function triggerKnowledgeSync(batchUrl: string, viewer: Viewer): Promise<string> {
-  // batch 側の audience 検証(https://{host})と一致させるため末尾スラッシュを正規化する
-  const audience = batchUrl.replace(/\/+$/, '');
-  const jobUrl = `${audience}/jobs/knowledge-sync`;
-  let res: Response;
-  try {
-    const token = await getIdTokenFor(audience);
-    res = await fetch(jobUrl, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${token}` },
-      signal: AbortSignal.timeout(SYNC_WAIT_MS),
-    });
-  } catch (err) {
-    if (typeof err === 'object' && err !== null && (err as { name?: unknown }).name === 'TimeoutError') {
-      logger.warn('今すぐ同期の応答待ちがタイムアウトしました(ジョブは継続している可能性があります)', {
-        errorCode: ERROR_CODES.SYNC_TRIGGER_FAILED,
-        operator: viewer.email,
-      });
-      return `${PATH}?sync_error=timeout`;
-    }
-    logger.error('今すぐ同期の起動に失敗しました', err, {
-      errorCode: ERROR_CODES.SYNC_TRIGGER_FAILED,
-      operator: viewer.email,
-    });
-    return `${PATH}?sync_error=request`;
-  }
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    logger.warn('今すぐ同期がエラー応答を返しました', {
-      errorCode: ERROR_CODES.SYNC_TRIGGER_FAILED,
-      status: res.status,
-      body: body.slice(0, 300),
-      operator: viewer.email,
-    });
-    return `${PATH}?sync_error=request`;
-  }
-  const summary = (await res.json().catch(() => ({}))) as {
-    sent?: unknown;
-    skipped?: unknown;
-    failed?: unknown;
-  };
-  const count = (value: unknown): number =>
-    typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : 0;
-  const sent = count(summary.sent);
-  const skipped = count(summary.skipped);
-  const failed = count(summary.failed);
-  auditLog(viewer, 'knowledge.sync', {}, { sent, skipped, failed });
-  return `${PATH}?synced=1&sent=${sent}&skipped=${skipped}&failed=${failed}`;
-}
-
 /** ナレッジ文書の投入・削除・即時同期。成功時はリダイレクト先を返す(PRG パターン)。 */
 export async function handleAdminKnowledgePost(
   pool: pg.Pool,
@@ -454,7 +403,20 @@ export async function handleAdminKnowledgePost(
         'BATCH_URL が未設定のため「今すぐ同期」は利用できません(毎日 06:30 の自動同期をお待ちください)',
       );
     }
-    return triggerKnowledgeSync(batchUrl, viewer);
+    // batch の /jobs/knowledge-sync を起動する(状況確認と共通のヘルパー)
+    return triggerBatchJob({
+      batchUrl,
+      jobName: 'knowledge-sync',
+      jobLabel: '今すぐ同期',
+      viewer,
+      waitMs: SYNC_WAIT_MS,
+      errorCode: ERROR_CODES.SYNC_TRIGGER_FAILED,
+      auditAction: 'knowledge.sync',
+      auditDetails: {},
+      redirectBase: PATH,
+      successParam: 'synced',
+      errorParam: 'sync_error',
+    });
   }
 
   throw invalidInput('不明な操作です');
