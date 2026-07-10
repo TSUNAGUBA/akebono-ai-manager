@@ -56,5 +56,7 @@ describe('migration 0006(dialogue_type の adhoc_checkin 拡張)', () => {
     }
     // 新規列は既存列より後に定義される
     expect(view.indexOf('AS adhoc_checkin_sent')).toBeGreaterThan(cursor);
+    // responding(v0.5)はさらに末尾(CREATE OR REPLACE VIEW は列の途中挿入を許さない)
+    expect(view.indexOf('AS responding')).toBeGreaterThan(view.indexOf('AS adhoc_checkin_answered'));
   });
 });
