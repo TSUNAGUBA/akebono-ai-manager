@@ -80,8 +80,18 @@ function Set-GcpSecret {
     $ErrorActionPreference = $previousEap
   }
   if ($LASTEXITCODE -ne 0) {
-    & gcloud secrets create $Name --replication-policy automatic --project $ProjectId | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "シークレット $Name の作成に失敗しました" }
+    # describe の失敗は「未作成」以外(gcloud の再認証要求など)でも起きるため、
+    # create が「already exists」で失敗した場合は既存として扱い先へ進む(冪等)
+    $previousEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+      $createOutput = (& gcloud secrets create $Name --replication-policy automatic --project $ProjectId 2>&1) -join "`n"
+    } finally {
+      $ErrorActionPreference = $previousEap
+    }
+    if ($LASTEXITCODE -ne 0 -and $createOutput -notmatch 'already exists') {
+      throw "シークレット $Name の作成に失敗しました: $createOutput"
+    }
   }
   # パイプ渡しは末尾に改行が付加され、DB_HOST 等が「\r\n 付き」で保存されて
   # 接続不能になるため、改行なしの一時ファイル経由で登録する
