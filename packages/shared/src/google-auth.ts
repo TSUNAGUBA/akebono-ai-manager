@@ -1,4 +1,4 @@
-import { GoogleAuth } from 'google-auth-library';
+import { GoogleAuth, type IdTokenClient } from 'google-auth-library';
 import { AppError, ERROR_CODES } from './errors.js';
 
 /**
@@ -31,8 +31,39 @@ export const SCOPES = {
   CLOUD_PLATFORM: 'https://www.googleapis.com/auth/cloud-platform',
   CHAT_BOT: 'https://www.googleapis.com/auth/chat.bot',
   DRIVE_READONLY: 'https://www.googleapis.com/auth/drive.readonly',
+  /**
+   * Drive 書込(ナレッジ管理 UI の投入・削除)。DWD ではなくランタイム SA 自身のトークンで使う。
+   * SA が書込めるのは「編集者」で共有されたフォルダに限られるため、
+   * 実効的な権限境界はスコープではなく Drive の共有 ACL(要件 v0.4 §2)。
+   */
+  DRIVE: 'https://www.googleapis.com/auth/drive',
   CALENDAR_READONLY: 'https://www.googleapis.com/auth/calendar.readonly',
 } as const;
+
+// ── サービス間認証(OIDC ID トークン)────────────────────────────────────
+// Cloud Run サービス間呼び出し(例: dashboard → batch の「今すぐ同期」)用。
+// ランタイム SA 自身の ID トークンで、呼び出し先の Cloud Run IAM(roles/run.invoker)と
+// アプリ層検証(batch の BATCH_INVOKER_SA 照合)の両方で検証される。
+
+const idTokenClientCache = new Map<string, IdTokenClient>();
+
+/** audience(呼び出し先サービスの URL)向けの OIDC ID トークンを取得する。 */
+export async function getIdTokenFor(audience: string): Promise<string> {
+  try {
+    let client = idTokenClientCache.get(audience);
+    if (client === undefined) {
+      client = await getGoogleAuth([SCOPES.CLOUD_PLATFORM]).getIdTokenClient(audience);
+      idTokenClientCache.set(audience, client);
+    }
+    return await client.idTokenProvider.fetchIdToken(audience);
+  } catch (err) {
+    throw new AppError(
+      ERROR_CODES.AUTH_TOKEN_INVALID,
+      `OIDC ID トークンを取得できませんでした(audience: ${audience})`,
+      { cause: err },
+    );
+  }
+}
 
 // ── ドメイン全体委任(Domain-Wide Delegation)────────────────────────────
 // メンバー本人としてカレンダー等を読むためのトークン取得。SA キーは持たないため、

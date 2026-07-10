@@ -21,6 +21,7 @@ import { renderWorkload } from './pages/workload.js';
 import { renderAdminUnconfigured, type AdminPageContext } from './pages/admin/common.js';
 import { handleAdminCustomersPost, renderAdminCustomers } from './pages/admin/customers.js';
 import { handleAdminIndustriesPost, renderAdminIndustries } from './pages/admin/industries.js';
+import { handleAdminKnowledgePost, renderAdminKnowledge } from './pages/admin/knowledge.js';
 import { handleAdminRelationsPost, renderAdminRelations } from './pages/admin/relations.js';
 import type { Raw } from './render/html.js';
 import { errorPage, pageLayout, type Viewer } from './render/layout.js';
@@ -109,6 +110,13 @@ const ADMIN_PAGES: AdminPageDef[] = [
     description: '顧客間関係(有向)の一覧・追加・削除と関係種別マスタの管理',
     render: renderAdminRelations,
     handlePost: handleAdminRelationsPost,
+  },
+  {
+    path: '/admin/knowledge',
+    title: 'マスタ管理: ナレッジ',
+    description: 'ナレッジ文書の一覧・投入・削除と即時同期(SoT は Drive。検索への反映は同期後)',
+    render: renderAdminKnowledge,
+    handlePost: handleAdminKnowledgePost,
   },
 ];
 

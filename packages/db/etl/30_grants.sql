@@ -42,6 +42,10 @@ BEGIN
       TO ai_manager_admin_rw;
     GRANT INSERT, UPDATE, DELETE ON ops.customer_industries, ops.customer_relations
       TO ai_manager_admin_rw;
+    -- ナレッジ管理ページ(v0.4)の同期状態表示用の読取のみ。書込は付与しない
+    -- (ナレッジの SoT は Drive。rag への書込は knowledge-sync ジョブ = app_rw の責務)
+    GRANT USAGE ON SCHEMA rag TO ai_manager_admin_rw;
+    GRANT SELECT ON rag.knowledge_chunks TO ai_manager_admin_rw;
     -- 過去の版で付与していた ops.users の SELECT を撤去する(適用済み環境を収束させる)
     REVOKE SELECT ON ops.users FROM ai_manager_admin_rw;
   END IF;

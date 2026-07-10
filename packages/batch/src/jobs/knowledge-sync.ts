@@ -1,5 +1,6 @@
 import {
   embedTexts,
+  listFilesRecursive,
   logger,
   optionalEnv,
   query,
@@ -7,7 +8,7 @@ import {
 } from '@ai-manager/shared';
 import type pg from 'pg';
 import { chunkDocument } from '../chunking.js';
-import { classifyDocument, fetchFileText, listFilesRecursive } from '../drive.js';
+import { classifyDocument, fetchFileText } from '../drive.js';
 import type { JobSummary } from './morning-checkin.js';
 
 /**

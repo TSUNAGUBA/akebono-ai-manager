@@ -11,12 +11,13 @@ export interface AdminPageContext {
   errorMessage?: string;
 }
 
-/** マスタ管理の3ページを行き来するサブナビ(タブ)。 */
+/** マスタ管理の各ページを行き来するサブナビ(タブ)。 */
 export function adminTabs(activePath: string): Raw {
   const tabs: Array<{ path: string; label: string }> = [
     { path: '/admin/industries', label: '業界マスタ' },
     { path: '/admin/customers', label: '顧客' },
     { path: '/admin/relations', label: '顧客間関係' },
+    { path: '/admin/knowledge', label: 'ナレッジ' },
   ];
   const links = tabs
     .map(

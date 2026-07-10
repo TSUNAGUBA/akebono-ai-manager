@@ -1,94 +1,12 @@
-import { AppError, ERROR_CODES, getAccessToken, SCOPES } from '@ai-manager/shared';
+import { DRIVE_API, driveFetch, GOOGLE_DOC_MIME, type DriveFile } from '@ai-manager/shared';
 
 /**
- * Google Drive REST クライアント(ナレッジ同期用・読み取り専用)。
- * ナレッジフォルダはランタイム SA に「閲覧者」で共有しておくこと。
+ * Google Drive ナレッジ文書の本文取得と分類(ナレッジ同期の batch 固有ロジック)。
+ * 低レベル API(driveFetch / listFilesRecursive / DriveFile 型等)は
+ * shared/src/drive.ts に共通化されている(ナレッジ管理 UI と共用: v0.4)。
+ * ナレッジフォルダのランタイム SA への共有は deployment-setup.md Step 7-3 を参照
+ * (同期のみなら閲覧者で足りるが、ナレッジ管理 UI の投入・削除には編集者が必要)。
  */
-const DRIVE_API = 'https://www.googleapis.com/drive/v3';
-
-export interface DriveFile {
-  id: string;
-  name: string;
-  mimeType: string;
-  /** ナレッジルートからの相対フォルダパス(例: 'customer/acme') */
-  path: string;
-}
-
-interface FilesListResponse {
-  files?: Array<{ id?: string; name?: string; mimeType?: string }>;
-  nextPageToken?: string;
-}
-
-const FOLDER_MIME = 'application/vnd.google-apps.folder';
-const GOOGLE_DOC_MIME = 'application/vnd.google-apps.document';
-
-async function driveFetch(url: string): Promise<Response> {
-  const token = await getAccessToken([SCOPES.DRIVE_READONLY]);
-  const res = await fetch(url, { headers: { authorization: `Bearer ${token}` } }).catch(
-    (err: unknown) => {
-      throw new AppError(ERROR_CODES.DRIVE_SYNC_FAILED, 'Google Drive への接続に失敗しました', {
-        cause: err,
-      });
-    },
-  );
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new AppError(ERROR_CODES.DRIVE_SYNC_FAILED, `Google Drive API がエラーを返しました (HTTP ${res.status})`, {
-      details: { status: res.status, body: body.slice(0, 300), url: url.split('?')[0] },
-    });
-  }
-  return res;
-}
-
-async function listChildren(folderId: string): Promise<Array<{ id: string; name: string; mimeType: string }>> {
-  const children: Array<{ id: string; name: string; mimeType: string }> = [];
-  let pageToken: string | undefined;
-  do {
-    const params = new URLSearchParams({
-      q: `'${folderId}' in parents and trashed = false`,
-      fields: 'files(id,name,mimeType),nextPageToken',
-      pageSize: '100',
-      supportsAllDrives: 'true',
-      includeItemsFromAllDrives: 'true',
-    });
-    if (pageToken !== undefined) params.set('pageToken', pageToken);
-    const res = await driveFetch(`${DRIVE_API}/files?${params.toString()}`);
-    const json = (await res.json()) as FilesListResponse;
-    for (const f of json.files ?? []) {
-      if (f.id !== undefined && f.name !== undefined && f.mimeType !== undefined) {
-        children.push({ id: f.id, name: f.name, mimeType: f.mimeType });
-      }
-    }
-    pageToken = json.nextPageToken;
-  } while (pageToken !== undefined);
-  return children;
-}
-
-/** ナレッジフォルダ配下を再帰的に列挙する(フォルダパス付き)。 */
-export async function listFilesRecursive(rootFolderId: string): Promise<DriveFile[]> {
-  const files: DriveFile[] = [];
-  const queue: Array<{ id: string; path: string }> = [{ id: rootFolderId, path: '' }];
-  const visited = new Set<string>();
-
-  while (queue.length > 0) {
-    const current = queue.shift();
-    if (current === undefined || visited.has(current.id)) continue;
-    visited.add(current.id);
-
-    const children = await listChildren(current.id);
-    for (const child of children) {
-      if (child.mimeType === FOLDER_MIME) {
-        queue.push({
-          id: child.id,
-          path: current.path === '' ? child.name : `${current.path}/${child.name}`,
-        });
-      } else {
-        files.push({ id: child.id, name: child.name, mimeType: child.mimeType, path: current.path });
-      }
-    }
-  }
-  return files;
-}
 
 /**
  * ファイル本文をテキストとして取得する。

@@ -68,6 +68,10 @@ export const ERROR_CODES = {
   ADMIN_INPUT_INVALID: 'AIM-6004',
   /** マスタ管理の書込が既存データと競合(一意制約違反等) */
   ADMIN_WRITE_CONFLICT: 'AIM-6005',
+  /** ナレッジ管理 UI からの Drive 書込(投入・上書き・削除)に失敗 */
+  DRIVE_WRITE_FAILED: 'AIM-6006',
+  /** ナレッジ同期ジョブ(今すぐ同期)の起動に失敗 */
+  SYNC_TRIGGER_FAILED: 'AIM-6007',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];
