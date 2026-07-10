@@ -31,6 +31,8 @@ function describeCause(cause: unknown, depth: number): unknown {
     if (c.code !== undefined) described['code'] = c.code;
     if (c.detail !== undefined) described['detail'] = c.detail;
     if (c.hint !== undefined) described['hint'] = c.hint;
+    // AppError が cause 側に来た場合(ジョブ層のラップ等)も details(folderId 等)を失わない
+    if (isAppError(cause) && cause.details !== undefined) described['details'] = cause.details;
     const nested = describeCause(c.cause, depth + 1);
     if (nested !== undefined) described['cause'] = nested;
     return described;

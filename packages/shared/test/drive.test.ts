@@ -77,7 +77,8 @@ async function expectAppErrorAsync(
 describe('listFilesRecursive(ルートフォルダの可視性検証)', () => {
   it('ルートが見える場合は files.get で確認してから配下を列挙する', async () => {
     responses.push(
-      jsonResponse(200, { id: 'root-1' }), // 可視性プローブ(files.get)
+      // 可視性プローブ(files.get)
+      jsonResponse(200, { id: 'root-1', mimeType: 'application/vnd.google-apps.folder', trashed: false }),
       jsonResponse(200, {
         files: [
           { id: 'sub-1', name: 'customer', mimeType: 'application/vnd.google-apps.folder' },
@@ -91,14 +92,14 @@ describe('listFilesRecursive(ルートフォルダの可視性検証)', () => {
     expect(files.map((f) => `${f.path}/${f.name}`)).toEqual(['/rules.md', 'customer/profile.md']);
   });
 
-  it('ルートが未共有・ID 誤り(404)は「0件の成功」ではなく AIM-5003(Step 7-3 の案内付き)', async () => {
+  it('ルートが未共有・ID 誤り(404)は「0件の成功」ではなく AIM-5003(Step 7-3 の案内付き・403)', async () => {
     // Drive の q 検索は「見える項目」しか返さないため、未共有は一覧空になる。
     // 先行する files.get の 404 を実アクションに変換できることを検証する
     responses.push(jsonResponse(404, { error: { message: 'File not found' } }));
     await expectAppErrorAsync(
       () => listFilesRecursive('ghost-folder'),
       ERROR_CODES.DRIVE_SYNC_FAILED,
-      500,
+      403,
       'Step 7-3',
     );
   });
@@ -108,8 +109,30 @@ describe('listFilesRecursive(ルートフォルダの可視性検証)', () => {
     await expectAppErrorAsync(
       () => listFilesRecursive('root-1'),
       ERROR_CODES.DRIVE_SYNC_FAILED,
-      500,
+      403,
       'ランタイム SA に共有されているか',
+    );
+  });
+
+  it('ゴミ箱内のフォルダ ID は AIM-5003(400)で可視化する(files.get は 200 を返すため)', async () => {
+    responses.push(
+      jsonResponse(200, { id: 'root-1', mimeType: 'application/vnd.google-apps.folder', trashed: true }),
+    );
+    await expectAppErrorAsync(
+      () => listFilesRecursive('root-1'),
+      ERROR_CODES.DRIVE_SYNC_FAILED,
+      400,
+      'ゴミ箱',
+    );
+  });
+
+  it('フォルダでないファイルの ID は AIM-5003(400)で可視化する', async () => {
+    responses.push(jsonResponse(200, { id: 'doc-1', mimeType: 'text/markdown', trashed: false }));
+    await expectAppErrorAsync(
+      () => listFilesRecursive('doc-1'),
+      ERROR_CODES.DRIVE_SYNC_FAILED,
+      400,
+      'フォルダではなくファイル',
     );
   });
 

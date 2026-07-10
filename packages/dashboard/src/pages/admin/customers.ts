@@ -118,7 +118,7 @@ export async function renderAdminCustomers(pool: pg.Pool, ctx: AdminPageContext)
     </label>
     <label class="field">ナレッジ Drive フォルダID(メモ用)
       <input type="text" name="knowledge_drive_folder_id" value="${r?.knowledge_drive_folder_id ?? ''}" maxlength="500" placeholder="任意">
-      <span class="form-help">ナレッジ同期はこの欄を参照しません。顧客文書はナレッジフォルダの customer/{顧客ID}/ 配下(フォルダ名=顧客ID)に置いてください</span>
+      <span class="form-help" style="display:block;margin-top:6px">ナレッジ同期はこの欄を参照しません。顧客文書はナレッジフォルダの customer/{顧客ID}/ 配下(フォルダ名=顧客ID)に置いてください</span>
     </label>
     <label class="field">メモ
       <textarea name="notes" maxlength="500" placeholder="任意">${r?.notes ?? ''}</textarea>

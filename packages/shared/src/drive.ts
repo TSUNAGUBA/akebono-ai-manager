@@ -87,20 +87,42 @@ async function listChildren(folderId: string): Promise<DriveChild[]> {
  * 「空フォルダ」と「見えていない」を区別できるよう、先に files.get で実在を確認する。
  */
 async function assertRootFolderVisible(rootFolderId: string): Promise<void> {
-  const params = new URLSearchParams({ fields: 'id', supportsAllDrives: 'true' });
+  const params = new URLSearchParams({ fields: 'id,mimeType,trashed', supportsAllDrives: 'true' });
+  let meta: { mimeType?: string; trashed?: boolean };
   try {
-    await driveFetch(`${DRIVE_API}/files/${encodeURIComponent(rootFolderId)}?${params.toString()}`);
+    const res = await driveFetch(
+      `${DRIVE_API}/files/${encodeURIComponent(rootFolderId)}?${params.toString()}`,
+    );
+    meta = (await res.json()) as { mimeType?: string; trashed?: boolean };
   } catch (err) {
     const status =
       err instanceof AppError ? (err.details as { status?: number } | undefined)?.status : undefined;
     if (status === 403 || status === 404) {
+      // 403 を付与して dashboard の POST 経路でも案内バナーが表示されるようにする
+      // (driveWriteFetch の権限エラー変換と同じ扱い)
       throw new AppError(
         ERROR_CODES.DRIVE_SYNC_FAILED,
         'ナレッジフォルダにアクセスできません。KNOWLEDGE_DRIVE_FOLDER_ID の値(フォルダ URL 末尾の ID)と、フォルダがランタイム SA に共有されているか(deployment-setup.md Step 7-3)を確認してください',
-        { cause: err, details: { status, folderId: rootFolderId } },
+        { status: 403, cause: err, details: { status, folderId: rootFolderId } },
       );
     }
     throw err;
+  }
+  // files.get はゴミ箱内・非フォルダの ID でも 200 を返し、その後の一覧が
+  // 黙って 0 件になるため、ここで設定誤りとして可視化する
+  if (meta.trashed === true) {
+    throw new AppError(
+      ERROR_CODES.DRIVE_SYNC_FAILED,
+      'ナレッジフォルダがゴミ箱に入っています。Drive で復元するか、KNOWLEDGE_DRIVE_FOLDER_ID を有効なフォルダの ID に更新してください',
+      { status: 400, details: { folderId: rootFolderId } },
+    );
+  }
+  if (meta.mimeType !== FOLDER_MIME) {
+    throw new AppError(
+      ERROR_CODES.DRIVE_SYNC_FAILED,
+      'KNOWLEDGE_DRIVE_FOLDER_ID がフォルダではなくファイルの ID を指しています。フォルダを開いたときの URL 末尾の ID を登録してください',
+      { status: 400, details: { folderId: rootFolderId, mimeType: meta.mimeType ?? null } },
+    );
   }
 }
 
