@@ -15,6 +15,7 @@ const TYPE_LABELS: Record<string, string> = {
   adhoc_qa: '質問対応',
   task_instruction: 'タスク指示',
   escalation: 'エスカレーション',
+  adhoc_checkin: '状況確認',
 };
 
 const MAX_TURN_CHARS = 200;

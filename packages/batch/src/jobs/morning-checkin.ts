@@ -48,6 +48,31 @@ interface TaskRow {
 }
 
 /**
+ * 本人の着手中タスク(approved / in_progress / blocked)を問いかけ文面向けの
+ * 箇条書きテキストに整形する。朝の問いかけと状況確認(adhoc-checkin)で共用する。
+ */
+export async function memberTasksSummary(pool: pg.Pool, userId: string): Promise<string> {
+  const tasks = await query<TaskRow>(
+    pool,
+    `SELECT t.title, t.status, t.due_date::text AS due_date, p.name AS project_name
+     FROM ops.tasks t
+     LEFT JOIN ops.projects p ON p.project_id = t.project_id
+     WHERE t.assignee_id = $1 AND t.status IN ('approved', 'in_progress', 'blocked')
+     ORDER BY t.due_date NULLS LAST, t.task_id
+     LIMIT 5`,
+    [userId],
+  );
+  if (tasks.rows.length === 0) return '(登録済みの着手中タスクはありません)';
+  return tasks.rows
+    .map((t) => {
+      const project = t.project_name === null ? '' : `[${t.project_name}] `;
+      const due = t.due_date === null ? '' : `(期限: ${t.due_date})`;
+      return `- ${project}${t.title} ${due}`;
+    })
+    .join('\n');
+}
+
+/**
  * 朝の問いかけ配信(M2)。
  * 冪等性: 当日分の morning_checkin 対話が既にあるユーザーはスキップする。
  * 非ブロッキング: 個別ユーザーの失敗は記録して次のユーザーへ進む。
@@ -90,26 +115,7 @@ export async function runMorningCheckin(pool: pg.Pool): Promise<JobSummary> {
         continue;
       }
 
-      const tasks = await query<TaskRow>(
-        pool,
-        `SELECT t.title, t.status, t.due_date::text AS due_date, p.name AS project_name
-         FROM ops.tasks t
-         LEFT JOIN ops.projects p ON p.project_id = t.project_id
-         WHERE t.assignee_id = $1 AND t.status IN ('approved', 'in_progress', 'blocked')
-         ORDER BY t.due_date NULLS LAST, t.task_id
-         LIMIT 5`,
-        [member.user_id],
-      );
-      const tasksSummary =
-        tasks.rows.length === 0
-          ? '(登録済みの着手中タスクはありません)'
-          : tasks.rows
-              .map((t) => {
-                const project = t.project_name === null ? '' : `[${t.project_name}] `;
-                const due = t.due_date === null ? '' : `(期限: ${t.due_date})`;
-                return `- ${project}${t.title} ${due}`;
-              })
-              .join('\n');
+      const tasksSummary = await memberTasksSummary(pool, member.user_id);
 
       // カレンダー(CALENDAR_ENABLED 時のみ。失敗時は undefined でタスクのみにフォールバック)
       const calendarText = await fetchTodayEventsText(member.email);

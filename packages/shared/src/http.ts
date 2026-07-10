@@ -23,21 +23,26 @@ export interface Route {
 
 const MAX_BODY_BYTES = 1024 * 1024; // 1MiB
 
-/** リクエストボディを UTF-8 文字列として読む。サイズ超過は AIM-3103(413)。 */
-async function readRawBody(req: http.IncomingMessage): Promise<string> {
+/** リクエストボディを Buffer として読む。サイズ超過は AIM-3103(413)。 */
+async function readRawBuffer(req: http.IncomingMessage, maxBytes: number): Promise<Buffer> {
   const chunks: Buffer[] = [];
   let total = 0;
   for await (const chunk of req) {
     const buf = chunk as Buffer;
     total += buf.length;
-    if (total > MAX_BODY_BYTES) {
+    if (total > maxBytes) {
       throw new AppError(ERROR_CODES.REQUEST_BODY_INVALID, 'リクエストボディが大きすぎます', {
         status: 413,
       });
     }
     chunks.push(buf);
   }
-  return Buffer.concat(chunks).toString('utf8');
+  return Buffer.concat(chunks);
+}
+
+/** リクエストボディを UTF-8 文字列として読む。サイズ超過は AIM-3103(413)。 */
+async function readRawBody(req: http.IncomingMessage): Promise<string> {
+  return (await readRawBuffer(req, MAX_BODY_BYTES)).toString('utf8');
 }
 
 /** JSON ボディを読む。サイズ超過・不正 JSON は AIM-3103。 */
@@ -57,12 +62,138 @@ export async function readJsonBody<T = unknown>(req: http.IncomingMessage): Prom
 }
 
 /**
+ * 任意の JSON ボディを読む。空ボディは undefined を返す(ボディ省略可のエンドポイント用。
+ * 例: batch の /jobs/{name} — Cloud Scheduler はボディなしで POST する)。
+ * 不正 JSON・サイズ超過は readJsonBody と同じく AIM-3103。
+ */
+export async function readOptionalJsonBody<T = unknown>(
+  req: http.IncomingMessage,
+): Promise<T | undefined> {
+  const raw = await readRawBody(req);
+  if (raw.trim() === '') return undefined;
+  try {
+    return JSON.parse(raw) as T;
+  } catch (err) {
+    throw new AppError(ERROR_CODES.REQUEST_BODY_INVALID, 'リクエストボディが JSON として不正です', {
+      status: 400,
+      cause: err,
+    });
+  }
+}
+
+/**
  * フォームボディ(application/x-www-form-urlencoded)を読む。
  * 空ボディは空の URLSearchParams を返す(必須項目の検証は呼び出し側の責務)。
  */
 export async function readFormBody(req: http.IncomingMessage): Promise<URLSearchParams> {
   const raw = await readRawBody(req);
   return new URLSearchParams(raw);
+}
+
+/** multipart/form-data のファイルパート。 */
+export interface MultipartFile {
+  /** フォームのフィールド名(input の name 属性)。 */
+  field: string;
+  /** 送信されたファイル名(パス要素は除去済み)。 */
+  fileName: string;
+  content: Buffer;
+}
+
+export interface MultipartFormBody {
+  /** ファイル以外のフィールド(hidden input 等)。CSRF 検証にそのまま使える。 */
+  fields: URLSearchParams;
+  files: MultipartFile[];
+}
+
+/** ファイルアップロードを含むリクエスト全体の上限(1ファイルの上限は呼び出し側で検証する)。 */
+const MULTIPART_MAX_BYTES = 4 * 1024 * 1024; // 4MiB
+/** パート数の上限(フィールド+ファイルの合計。フォーム偽装による資源消費の抑止)。 */
+const MULTIPART_MAX_PARTS = 40;
+
+/** リクエストが multipart/form-data かどうか(ファイルアップロードのフォーム判定)。 */
+export function isMultipartRequest(req: http.IncomingMessage): boolean {
+  return (req.headers['content-type'] ?? '').toLowerCase().startsWith('multipart/form-data');
+}
+
+function multipartInvalid(message: string): AppError {
+  return new AppError(ERROR_CODES.REQUEST_BODY_INVALID, message, { status: 400 });
+}
+
+/** Content-Disposition の name="..." / filename="..." を取り出す(\" と \\ のみ復元)。 */
+function dispositionParam(disposition: string, param: string): string | undefined {
+  const m = new RegExp(`(?:^|;)\\s*${param}="((?:[^"\\\\]|\\\\.)*)"`, 'i').exec(disposition);
+  if (m?.[1] === undefined) return undefined;
+  return m[1].replaceAll('\\"', '"').replaceAll('\\\\', '\\');
+}
+
+/**
+ * フォームボディ(multipart/form-data)を読む。RFC 7578 のうちブラウザのフォーム送信が
+ * 使う範囲(boundary 区切り・Content-Disposition の name / filename)のみ対応する
+ * (外部依存を増やさない最小実装。呼び出し元は自前のフォームに限られる)。
+ * - 全体サイズ超過は AIM-3103(413)、構文不正・パート数超過は AIM-3103(400)
+ * - filename のパス要素(/ や \)はファイル名部分のみに切り詰める
+ * - ファイル未選択(filename が空)のパートはファイルとして扱わない
+ */
+export async function readMultipartFormBody(
+  req: http.IncomingMessage,
+): Promise<MultipartFormBody> {
+  const contentType = req.headers['content-type'] ?? '';
+  const boundaryMatch = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(contentType);
+  const boundary = (boundaryMatch?.[1] ?? boundaryMatch?.[2])?.trim();
+  if (boundary === undefined || boundary === '') {
+    throw multipartInvalid('multipart/form-data の boundary がありません');
+  }
+
+  const body = await readRawBuffer(req, MULTIPART_MAX_BYTES);
+  const delimiter = Buffer.from(`--${boundary}`);
+  const fields = new URLSearchParams();
+  const files: MultipartFile[] = [];
+
+  // 先頭のデリミタ(preamble は無視する)
+  let cursor = body.indexOf(delimiter);
+  if (cursor === -1) throw multipartInvalid('multipart/form-data の形式が不正です');
+  cursor += delimiter.length;
+
+  for (let part = 0; ; part += 1) {
+    if (part >= MULTIPART_MAX_PARTS) {
+      throw multipartInvalid('multipart/form-data のパート数が多すぎます');
+    }
+    // デリミタ直後: "--" なら終端、"\r\n" ならパート開始
+    if (body.subarray(cursor, cursor + 2).toString('latin1') === '--') return { fields, files };
+    if (body.subarray(cursor, cursor + 2).toString('latin1') !== '\r\n') {
+      throw multipartInvalid('multipart/form-data の形式が不正です');
+    }
+    cursor += 2;
+
+    const headerEnd = body.indexOf('\r\n\r\n', cursor);
+    if (headerEnd === -1) throw multipartInvalid('multipart/form-data のヘッダーが不正です');
+    const headerLines = body.subarray(cursor, headerEnd).toString('utf8').split('\r\n');
+    const disposition = headerLines.find((l) => l.toLowerCase().startsWith('content-disposition:'));
+    if (disposition === undefined) {
+      throw multipartInvalid('multipart/form-data に Content-Disposition がありません');
+    }
+    const name = dispositionParam(disposition, 'name');
+    if (name === undefined) {
+      throw multipartInvalid('multipart/form-data のフィールド名がありません');
+    }
+    const rawFileName = dispositionParam(disposition, 'filename');
+
+    const contentStart = headerEnd + 4;
+    // パート本文は「\r\n + デリミタ」まで(本文中に CRLF を含んでも安全)
+    const next = body.indexOf(Buffer.concat([Buffer.from('\r\n'), delimiter]), contentStart);
+    if (next === -1) throw multipartInvalid('multipart/form-data の終端がありません');
+    const content = body.subarray(contentStart, next);
+    cursor = next + 2 + delimiter.length;
+
+    if (rawFileName === undefined) {
+      fields.append(name, content.toString('utf8'));
+      continue;
+    }
+    // パス付きで送るブラウザ・OS に備えてファイル名部分のみを使う
+    const fileName = rawFileName.split(/[/\\]/).pop() ?? '';
+    if (fileName === '') continue; // ファイル未選択の空パート
+    files.push({ field: name, fileName, content: Buffer.from(content) });
+  }
 }
 
 export function sendJson(res: http.ServerResponse, status: number, body: unknown): void {

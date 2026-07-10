@@ -18,6 +18,7 @@ export function adminTabs(activePath: string): Raw {
     { path: '/admin/customers', label: '顧客' },
     { path: '/admin/relations', label: '顧客間関係' },
     { path: '/admin/knowledge', label: 'ナレッジ' },
+    { path: '/admin/checkin', label: '状況確認' },
   ];
   const links = tabs
     .map(
@@ -63,9 +64,11 @@ export function activeBadge(active: boolean): Raw {
 /**
  * 管理用 DB 接続が未構成の場合の案内ページ(グレースフルデグラデーション)。
  * 閲覧機能には影響しないことを明示する。
+ * サブナビ(タブ)は未構成でも表示する — 閲覧用接続で完結するページ
+ * (例: /admin/checkin)は未構成でも利用でき、タブが唯一の導線のため。
  */
-export function renderAdminUnconfigured(): Raw {
-  return html`<div class="card">
+export function renderAdminUnconfigured(activePath: string): Raw {
+  return html`${adminTabs(activePath)}<div class="card">
     <h2 style="margin-top:0">マスタ管理は未構成です</h2>
     <p>
       管理用 DB 接続の環境変数(<strong>DB_ADMIN_USER</strong> / <strong>DB_ADMIN_PASSWORD</strong>)が

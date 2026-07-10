@@ -31,6 +31,20 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# gcloud の認証切れ(再認証要求)があると、以降の silent describe が失敗して
+# 「シークレット未作成」と誤判定され、既存パスワードの「空 Enter でスキップ」が
+# 使えなくなるため、実行冒頭に認証状態を1回検証する
+$previousEap = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try {
+  & gcloud auth print-access-token *> $null
+} finally {
+  $ErrorActionPreference = $previousEap
+}
+if ($LASTEXITCODE -ne 0) {
+  throw 'gcloud の認証が確認できませんでした。gcloud auth login を実行してから再実行してください'
+}
+
 function Read-RequiredValue {
   param([string]$Current, [string]$Prompt)
   if (-not [string]::IsNullOrWhiteSpace($Current)) { return $Current }
@@ -80,8 +94,20 @@ function Set-GcpSecret {
     $ErrorActionPreference = $previousEap
   }
   if ($LASTEXITCODE -ne 0) {
-    & gcloud secrets create $Name --replication-policy automatic --project $ProjectId | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "シークレット $Name の作成に失敗しました" }
+    # describe の失敗は「未作成」以外(gcloud の再認証要求など)でも起きるため、
+    # create が「already exists」で失敗した場合は既存として扱い先へ進む(冪等)
+    $previousEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+      $createOutput = (& gcloud secrets create $Name --replication-policy automatic --project $ProjectId 2>&1) -join "`n"
+    } finally {
+      $ErrorActionPreference = $previousEap
+    }
+    # gcloud のバージョン・エラー面により ALREADY_EXISTS(アンダースコア形式)の場合が
+    # あるため両形式を吸収する(-notmatch は既定で大文字小文字を区別しない)
+    if ($LASTEXITCODE -ne 0 -and $createOutput -notmatch 'already[ _]exists') {
+      throw "シークレット $Name の作成に失敗しました: $createOutput"
+    }
   }
   # パイプ渡しは末尾に改行が付加され、DB_HOST 等が「\r\n 付き」で保存されて
   # 接続不能になるため、改行なしの一時ファイル経由で登録する

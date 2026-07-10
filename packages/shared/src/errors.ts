@@ -72,6 +72,8 @@ export const ERROR_CODES = {
   DRIVE_WRITE_FAILED: 'AIM-6006',
   /** ナレッジ同期ジョブ(今すぐ同期)の起動に失敗 */
   SYNC_TRIGGER_FAILED: 'AIM-6007',
+  /** 状況確認ジョブ(adhoc-checkin)の起動に失敗 */
+  CHECKIN_TRIGGER_FAILED: 'AIM-6008',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

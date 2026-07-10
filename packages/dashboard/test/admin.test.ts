@@ -527,6 +527,63 @@ describe('adminPostRoute のエラー応答(HTTP 統合)', () => {
   });
 });
 
+describe('adminPostRoute の multipart 受信(HTTP 統合・v0.6)', () => {
+  it('multipart/form-data の POST でも CSRF 検証と書込ハンドラが動く(PRG 303)', async () => {
+    const prevAuthMode = process.env['AUTH_MODE'];
+    process.env['AUTH_MODE'] = 'header';
+    const usersPool = {
+      query: () =>
+        Promise.resolve({
+          rows: [{ user_id: 'u1', display_name: 'テスト', email: 't@example.com', role: 'admin' }],
+          rowCount: 1,
+        }),
+    } as unknown as pg.Pool;
+    const server = createDashboardServer(usersPool, stubPool());
+    await new Promise<void>((resolve) => server.listen(0, resolve));
+    const { port } = server.address() as AddressInfo;
+    const boundary = 'integration-boundary';
+    const fieldPart = (name: string, value: string): string =>
+      `--${boundary}\r\ncontent-disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`;
+    const body =
+      fieldPart(CSRF_FIELD, VALID_TOKEN) +
+      fieldPart('action', 'create') +
+      fieldPart('industry_id', 'retail') +
+      fieldPart('name', '小売業') +
+      `--${boundary}--\r\n`;
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/admin/industries`, {
+        method: 'POST',
+        redirect: 'manual',
+        headers: {
+          'content-type': `multipart/form-data; boundary=${boundary}`,
+          'x-goog-authenticated-user-email': 'accounts.google.com:t@example.com',
+          cookie: `${CSRF_COOKIE}=${VALID_TOKEN}`,
+        },
+        body,
+      });
+      expect(res.status).toBe(303);
+      expect(res.headers.get('location')).toContain('saved=created');
+
+      // CSRF フィールドがなければ multipart でも 403(検証は同じ経路)
+      const noCsrf = await fetch(`http://127.0.0.1:${port}/admin/industries`, {
+        method: 'POST',
+        redirect: 'manual',
+        headers: {
+          'content-type': `multipart/form-data; boundary=${boundary}`,
+          'x-goog-authenticated-user-email': 'accounts.google.com:t@example.com',
+          cookie: `${CSRF_COOKIE}=${VALID_TOKEN}`,
+        },
+        body: fieldPart('action', 'create') + `--${boundary}--\r\n`,
+      });
+      expect(noCsrf.status).toBe(403);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      if (prevAuthMode === undefined) delete process.env['AUTH_MODE'];
+      else process.env['AUTH_MODE'] = prevAuthMode;
+    }
+  });
+});
+
 describe('ナビゲーションの出し分け', () => {
   const body = { html: '<div></div>' };
 
