@@ -451,6 +451,11 @@ describe('ナレッジ書込ハンドラ: ファイルアップロード(upload_
     expect(mocks.upsertTextFile).toHaveBeenCalledWith('target-folder', 'readme.md', 'x');
   });
 
+  it('前後空白付きのファイル名は trim して受理する(拡張子判定の前に行う)', async () => {
+    await handleAdminKnowledgePost(stubPool(), viewer, filesForm(), [file('notes.md ', 'x')]);
+    expect(mocks.upsertTextFile).toHaveBeenCalledWith('target-folder', 'notes.md', 'x');
+  });
+
   it('ファイル未選択は AIM-6004(400)', async () => {
     await expectAppErrorAsync(
       () => handleAdminKnowledgePost(stubPool(), viewer, filesForm(), []),

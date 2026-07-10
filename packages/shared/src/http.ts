@@ -133,9 +133,10 @@ function dispositionParam(disposition: string, param: string): string | undefine
  * - 全体サイズ超過は AIM-3103(413)、構文不正・パート数超過は AIM-3103(400)
  * - filename のパス要素(/ や \)はファイル名部分のみに切り詰める
  * - ファイル未選択(filename が空)のパートはファイルとして扱わない
- * - 既知の制限: パート本文のバイト列が「CRLF + デリミタ」と完全一致する箇所を含む場合は
- *   形式不正(400)として全体を拒否する(誤分割で内容を壊すより安全側に倒す。
- *   ブラウザの boundary はランダム生成のため実運用で衝突しない)
+ * - 既知の制限: パート本文に「CRLF + デリミタ」と一致するバイト列を含む場合、そこを
+ *   境界として解釈する(直後がパート構文として不正なら全体を 400 で拒否し、有効なら
+ *   その位置で分割される)。RFC 2046 上 boundary は本文に現れない前提であり、
+ *   ブラウザの boundary はランダム生成のため実運用で衝突しない
  */
 export async function readMultipartFormBody(
   req: http.IncomingMessage,
@@ -189,7 +190,7 @@ export async function readMultipartFormBody(
 
     const contentStart = headerEnd + 4;
     // パート本文は「\r\n + デリミタ」まで(本文中の CRLF 単体は保全される。
-    // 「CRLF + デリミタ」と完全一致する本文は関数ドキュメント記載のとおり全体拒否)
+    // 「CRLF + デリミタ」一致箇所は境界として解釈される — 関数ドキュメントの既知の制限)
     const next = body.indexOf(Buffer.concat([Buffer.from('\r\n'), delimiter]), contentStart);
     if (next === -1) throw multipartInvalid('multipart/form-data の終端がありません');
     const content = body.subarray(contentStart, next);

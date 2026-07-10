@@ -456,8 +456,9 @@ export async function handleAdminKnowledgePost(
     const seen = new Set<string>();
     const validated: Array<{ fileName: string; content: string; contentBytes: number }> = [];
     for (const file of files) {
-      // OS 由来の大文字を含むファイル名を規約(小文字)へ寄せる
-      const lowered = file.fileName.toLowerCase();
+      // OS 由来の大文字・前後空白を含むファイル名を規約(小文字)へ寄せる
+      // (trim は normalizeKnowledgeFileName と同じ扱い — 拡張子判定の前に行う)
+      const lowered = file.fileName.trim().toLowerCase();
       // 「.md 自動付与」は直接入力の入力補助であり、実ファイル名を持つアップロードには
       // 適用しない(data.json → data.json.md のような対象外形式の素通り・無断改名を防ぐ — v0.6 §1)
       if (!/\.(md|txt)$/.test(lowered)) {
