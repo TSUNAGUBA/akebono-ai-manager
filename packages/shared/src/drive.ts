@@ -80,8 +80,33 @@ async function listChildren(folderId: string): Promise<DriveChild[]> {
   return children;
 }
 
-/** ナレッジフォルダ配下を再帰的に列挙する(フォルダパス付き)。 */
+/**
+ * ナレッジルートフォルダの可視性を検証する。
+ * Drive の一覧(files.list の q 検索)は「呼び出し元から見える項目」だけを返すため、
+ * フォルダの未共有・ID 誤りはエラーにならず黙って 0 件になる(サイレント失敗)。
+ * 「空フォルダ」と「見えていない」を区別できるよう、先に files.get で実在を確認する。
+ */
+async function assertRootFolderVisible(rootFolderId: string): Promise<void> {
+  const params = new URLSearchParams({ fields: 'id', supportsAllDrives: 'true' });
+  try {
+    await driveFetch(`${DRIVE_API}/files/${encodeURIComponent(rootFolderId)}?${params.toString()}`);
+  } catch (err) {
+    const status =
+      err instanceof AppError ? (err.details as { status?: number } | undefined)?.status : undefined;
+    if (status === 403 || status === 404) {
+      throw new AppError(
+        ERROR_CODES.DRIVE_SYNC_FAILED,
+        'ナレッジフォルダにアクセスできません。KNOWLEDGE_DRIVE_FOLDER_ID の値(フォルダ URL 末尾の ID)と、フォルダがランタイム SA に共有されているか(deployment-setup.md Step 7-3)を確認してください',
+        { cause: err, details: { status, folderId: rootFolderId } },
+      );
+    }
+    throw err;
+  }
+}
+
+/** ナレッジフォルダ配下を再帰的に列挙する(フォルダパス付き)。未共有・ID 誤りは AIM-5003。 */
 export async function listFilesRecursive(rootFolderId: string): Promise<DriveFile[]> {
+  await assertRootFolderVisible(rootFolderId);
   const files: DriveFile[] = [];
   const queue: Array<{ id: string; path: string }> = [{ id: rootFolderId, path: '' }];
   const visited = new Set<string>();

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ERROR_CODES, isAppError } from '../src/errors.js';
-import { ensureSubfolder, trashFile, upsertTextFile } from '../src/drive.js';
+import { ensureSubfolder, listFilesRecursive, trashFile, upsertTextFile } from '../src/drive.js';
 
 // トークン取得(ADC)はモックし、Drive API への fetch を検証する
 vi.mock('../src/google-auth.js', async (importOriginal) => {
@@ -73,6 +73,56 @@ async function expectAppErrorAsync(
   }
   expect.fail('例外が発生しませんでした');
 }
+
+describe('listFilesRecursive(ルートフォルダの可視性検証)', () => {
+  it('ルートが見える場合は files.get で確認してから配下を列挙する', async () => {
+    responses.push(
+      jsonResponse(200, { id: 'root-1' }), // 可視性プローブ(files.get)
+      jsonResponse(200, {
+        files: [
+          { id: 'sub-1', name: 'customer', mimeType: 'application/vnd.google-apps.folder' },
+          { id: 'doc-1', name: 'rules.md', mimeType: 'text/markdown' },
+        ],
+      }),
+      jsonResponse(200, { files: [{ id: 'doc-2', name: 'profile.md', mimeType: 'text/markdown' }] }),
+    );
+    const files = await listFilesRecursive('root-1');
+    expect(calls[0]?.url).toContain('/files/root-1?');
+    expect(files.map((f) => `${f.path}/${f.name}`)).toEqual(['/rules.md', 'customer/profile.md']);
+  });
+
+  it('ルートが未共有・ID 誤り(404)は「0件の成功」ではなく AIM-5003(Step 7-3 の案内付き)', async () => {
+    // Drive の q 検索は「見える項目」しか返さないため、未共有は一覧空になる。
+    // 先行する files.get の 404 を実アクションに変換できることを検証する
+    responses.push(jsonResponse(404, { error: { message: 'File not found' } }));
+    await expectAppErrorAsync(
+      () => listFilesRecursive('ghost-folder'),
+      ERROR_CODES.DRIVE_SYNC_FAILED,
+      500,
+      'Step 7-3',
+    );
+  });
+
+  it('ルートへの権限なし(403)も同じ案内の AIM-5003', async () => {
+    responses.push(jsonResponse(403, { error: { message: 'forbidden' } }));
+    await expectAppErrorAsync(
+      () => listFilesRecursive('root-1'),
+      ERROR_CODES.DRIVE_SYNC_FAILED,
+      500,
+      'ランタイム SA に共有されているか',
+    );
+  });
+
+  it('一時障害(500 等)は共有案内に変換せず元のエラーのまま伝える', async () => {
+    responses.push(jsonResponse(500, { error: { message: 'backend error' } }));
+    await expectAppErrorAsync(
+      () => listFilesRecursive('root-1'),
+      ERROR_CODES.DRIVE_SYNC_FAILED,
+      500,
+      'Google Drive API がエラーを返しました',
+    );
+  });
+});
 
 describe('upsertTextFile(v0.4: 同名ファイルは上書き・なければ新規作成)', () => {
   it('既存あり: PATCH /upload(uploadType=media)で内容のみ更新する', async () => {
