@@ -30,6 +30,8 @@ interface MemberStatusRow {
   morning_answered: boolean;
   adhoc_sent: boolean;
   adhoc_answered: boolean;
+  /** 朝の問いかけ・振り返りに応答中(送信してもスキップされる — 対話の横取り防止)。 */
+  responding: boolean;
 }
 
 /** 送信結果・失敗のフラッシュ表示(PRG: 再読み込みで再送しないよう query で受け渡す)。 */
@@ -92,7 +94,8 @@ export async function renderAdminCheckin(pool: pg.Pool, ctx: AdminPageContext): 
          COALESCE(s.morning_checkin_sent, FALSE) AS morning_sent,
          COALESCE(s.checkin_answered, FALSE) AS morning_answered,
          COALESCE(s.adhoc_checkin_sent, FALSE) AS adhoc_sent,
-         COALESCE(s.adhoc_checkin_answered, FALSE) AS adhoc_answered
+         COALESCE(s.adhoc_checkin_answered, FALSE) AS adhoc_answered,
+         COALESCE(s.responding, FALSE) AS responding
        FROM ops.users u
        LEFT JOIN ops.v_dialogue_daily_stats s
          ON s.user_id = u.user_id AND s.jst_date = $1::date
@@ -121,6 +124,7 @@ export async function renderAdminCheckin(pool: pg.Pool, ctx: AdminPageContext): 
       morning_answered: false,
       adhoc_sent: false,
       adhoc_answered: false,
+      responding: false,
     }));
   }
 
@@ -128,10 +132,14 @@ export async function renderAdminCheckin(pool: pg.Pool, ctx: AdminPageContext): 
 
   const sendForm = (row: MemberStatusRow): Raw => {
     if (batchUrl === '') return raw('—');
-    // DM 未登録は送信してもスキップされるため、ボタンを無効化して理由を示す(batch 側でも防御)
-    const disabled = row.dm_ready
-      ? ''
-      : ' disabled title="DM スペース未登録のため送信できません(本人が Chat アプリに一度話しかけると登録されます)"';
+    // DM 未登録・応答中は送信してもスキップされるため、ボタンを無効化して理由を示す。
+    // 判定の SoT は batch 側(集計ビュー未反映時はボタン有効のまま batch がスキップする)
+    const disabledReason = !row.dm_ready
+      ? 'DM スペース未登録のため送信できません(本人が Chat アプリに一度話しかけると登録されます)'
+      : row.responding
+        ? '朝の問いかけ・振り返りに応答中のため送信できません(対話の横取り防止。応答の完了後に送信できます)'
+        : undefined;
+    const disabled = disabledReason === undefined ? '' : ` disabled title="${h(disabledReason)}"`;
     return raw(`<form method="post" action="${PATH}" class="inline-form">
       ${csrfField(ctx).html}
       <input type="hidden" name="action" value="send">

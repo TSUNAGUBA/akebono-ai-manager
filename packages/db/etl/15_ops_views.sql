@@ -20,6 +20,14 @@ SELECT
   bool_or(dialogue_type = 'morning_checkin') AS morning_checkin_sent,
   bool_or(dialogue_type = 'adhoc_checkin') AS adhoc_checkin_sent,
   bool_or(dialogue_type = 'adhoc_checkin' AND turns @> '[{"role":"user"}]'::jsonb)
-    AS adhoc_checkin_answered
+    AS adhoc_checkin_answered,
+  -- 応答中: open な朝の問いかけ/振り返りに本人の返信が付いている状態。
+  -- 状況確認(adhoc-checkin)はこの状態のメンバーをスキップする(対話の横取り防止 — v0.5 §2)
+  -- ため、画面側のボタン無効化に使う(判定の SoT は batch 側。本列は表示用)
+  bool_or(
+    ((dialogue_type = 'morning_checkin' AND hypothesis IS NULL)
+      OR (dialogue_type = 'completion_review' AND review IS NULL))
+    AND turns @> '[{"role":"user"}]'::jsonb
+  ) AS responding
 FROM ops.dialogues
 GROUP BY user_id, (created_at AT TIME ZONE 'Asia/Tokyo')::date;

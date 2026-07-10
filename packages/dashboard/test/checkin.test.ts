@@ -39,6 +39,7 @@ const memberRows = [
     morning_answered: false,
     adhoc_sent: true,
     adhoc_answered: false,
+    responding: false,
   },
   {
     user_id: 'member2',
@@ -48,6 +49,7 @@ const memberRows = [
     morning_answered: false,
     adhoc_sent: false,
     adhoc_answered: false,
+    responding: false,
   },
 ];
 
@@ -163,6 +165,15 @@ describe('状況確認ページの描画', () => {
     const out = (await renderAdminCheckin(stubPool(), adminCtx())).html;
     expect(out).toContain('member2');
     expect(out).toContain('disabled title="DM スペース未登録のため送信できません');
+  });
+
+  it('応答中(open な朝/夕対話に本人の返信あり)メンバーの個別ボタンは無効化される(対話の横取り防止)', async () => {
+    process.env['BATCH_URL'] = 'https://batch.example.run.app';
+    const rows = [{ ...memberRows[0], responding: true }];
+    const out = (await renderAdminCheckin(stubPool([], { rows }), adminCtx())).html;
+    expect(out).toContain('disabled title="朝の問いかけ・振り返りに応答中のため送信できません');
+    // 全員送信は止めない(batch 側が応答中をスキップして件数を報告する)
+    expect(out).toContain('>全員に問いかける</button>');
   });
 
   it('BATCH_URL 未設定なら送信ボタンを出さず案内を表示する', async () => {

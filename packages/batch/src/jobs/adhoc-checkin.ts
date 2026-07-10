@@ -100,7 +100,9 @@ export async function runAdhocCheckin(
       // メンバーはスキップする(v0.5 §2)。返信の帰属(findOpenDialogue)は当日の最新の
       // open 対話に決まるため、途中で状況確認を差し込むと本人の続きの返信が状況確認側に
       // 吸収され、仮説形成(M2)のフローが中断する。まだ返信が付いていない「未応答」の
-      // メンバーには通常どおり送信できる(未応答者への問いかけが本機能の主目的)
+      // メンバーには通常どおり送信できる(未応答者への問いかけが本機能の主目的)。
+      // 振り返り(completion_review)は本人の完了申告から始まる=必ず本人の発話を含むため、
+      // open である間は常にスキップ対象になる(v0.5 §2-5 に明記したトレードオフ)
       const midDialogue = await query(
         pool,
         `SELECT 1 FROM ops.dialogues
