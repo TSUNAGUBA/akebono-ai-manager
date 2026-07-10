@@ -119,10 +119,25 @@ describe('readMultipartFormBody', () => {
     await expectInvalid(filePart('files', 'big.md', big) + CLOSE, 413);
   });
 
-  it('パート数超過は AIM-3103(400)', async () => {
-    const body =
-      Array.from({ length: 41 }, (_, i) => fieldPart(`f${i}`, 'v')).join('') + CLOSE;
-    await expectInvalid(body, 400);
+  it('パート数超過は AIM-3103(400)、上限ちょうど(40 パート)は受理する', async () => {
+    const parts = (n: number): string =>
+      Array.from({ length: n }, (_, i) => fieldPart(`f${i}`, 'v')).join('') + CLOSE;
+    await expectInvalid(parts(41), 400);
+    const ok = await readMultipartFormBody(mockReq(parts(40)));
+    expect([...ok.fields.keys()]).toHaveLength(40);
+  });
+
+  it('boundary の RFC 上限(70 文字)超過は AIM-3103(400)、上限ちょうどは受理する', async () => {
+    // 長大 boundary は Buffer.indexOf の最悪計算量を突く CPU 消費に使えるため必ず弾く
+    const build = (b: string): { body: string; type: string } => ({
+      body: `--${b}\r\ncontent-disposition: form-data; name="a"\r\n\r\nv\r\n--${b}--\r\n`,
+      type: `multipart/form-data; boundary=${b}`,
+    });
+    const tooLong = build('b'.repeat(71));
+    await expectInvalid(tooLong.body, 400, tooLong.type);
+    const max = build('b'.repeat(70));
+    const ok = await readMultipartFormBody(mockReq(max.body, max.type));
+    expect(ok.fields.get('a')).toBe('v');
   });
 
   it('本文にデリミタ風の文字列を含んでも境界(CRLF+デリミタ)でのみ区切る', async () => {

@@ -214,6 +214,32 @@ describe('ナレッジページの描画', () => {
     expect(out).toContain('更新 3 件');
     expect(out).not.toContain('<x>');
   });
+
+  it('アップロード結果のフラッシュ(?uploaded=1)は件数と規約適合の失敗ファイル名のみ表示する(受け入れ基準1)', async () => {
+    process.env['KNOWLEDGE_DRIVE_FOLDER_ID'] = 'root-folder';
+    const failedNames = encodeURIComponent('b.md,<img>.md,大文字.txt');
+    const out = (
+      await renderAdminKnowledge(
+        stubPool(),
+        adminCtx(`?uploaded=1&created=2&updated=1&failed=2&failed_names=${failedNames}`),
+      )
+    ).html;
+    expect(out).toContain('新規 2 件・上書き 1 件・失敗 2 件');
+    // 失敗ファイル名はファイル名規約に一致するもののみ表示(クエリ偽装による表示注入の防止)
+    expect(out).toContain('失敗したファイル: b.md');
+    expect(out).not.toContain('<img>');
+    expect(out).not.toContain('大文字');
+  });
+
+  it('アップロードフォーム(ファイル・複数)と直接入力フォームの両方を表示する', async () => {
+    process.env['KNOWLEDGE_DRIVE_FOLDER_ID'] = 'root-folder';
+    const out = (await renderAdminKnowledge(stubPool(), adminCtx())).html;
+    expect(out).toContain('enctype="multipart/form-data"');
+    expect(out).toContain('name="files" multiple');
+    expect(out).toContain('value="upload_files"');
+    expect(out).toContain('value="upload"');
+    expect(out).toContain('<textarea name="content"');
+  });
 });
 
 describe('ナレッジ書込ハンドラ(POST)', () => {
@@ -442,6 +468,18 @@ describe('ナレッジ書込ハンドラ: ファイルアップロード(upload_
       400,
       '10 件まで',
     );
+    expect(mocks.upsertTextFile).not.toHaveBeenCalled();
+  });
+
+  it('拡張子 .md / .txt 以外は .md 自動付与で素通りさせず AIM-6004(400)', async () => {
+    for (const bad of ['data.json', 'index.html', 'archive.tar.gz', 'readme']) {
+      await expectAppErrorAsync(
+        () => handleAdminKnowledgePost(stubPool(), viewer, filesForm(), [file(bad, 'x')]),
+        ERROR_CODES.ADMIN_INPUT_INVALID,
+        400,
+        '対応していない形式',
+      );
+    }
     expect(mocks.upsertTextFile).not.toHaveBeenCalled();
   });
 

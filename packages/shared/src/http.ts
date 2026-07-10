@@ -133,6 +133,9 @@ function dispositionParam(disposition: string, param: string): string | undefine
  * - 全体サイズ超過は AIM-3103(413)、構文不正・パート数超過は AIM-3103(400)
  * - filename のパス要素(/ や \)はファイル名部分のみに切り詰める
  * - ファイル未選択(filename が空)のパートはファイルとして扱わない
+ * - 既知の制限: パート本文のバイト列が「CRLF + デリミタ」と完全一致する箇所を含む場合は
+ *   形式不正(400)として全体を拒否する(誤分割で内容を壊すより安全側に倒す。
+ *   ブラウザの boundary はランダム生成のため実運用で衝突しない)
  */
 export async function readMultipartFormBody(
   req: http.IncomingMessage,
@@ -142,6 +145,11 @@ export async function readMultipartFormBody(
   const boundary = (boundaryMatch?.[1] ?? boundaryMatch?.[2])?.trim();
   if (boundary === undefined || boundary === '') {
     throw multipartInvalid('multipart/form-data の boundary がありません');
+  }
+  // RFC 2046 §5.1.1 の上限(70 文字)。逸脱した長大 boundary は Buffer.indexOf の
+  // 最悪計算量(O(n·m))を突いた CPU 消費(イベントループ停止)に使えるため必ず弾く
+  if (boundary.length > 70) {
+    throw multipartInvalid('multipart/form-data の boundary が長すぎます');
   }
 
   const body = await readRawBuffer(req, MULTIPART_MAX_BYTES);
@@ -155,11 +163,12 @@ export async function readMultipartFormBody(
   cursor += delimiter.length;
 
   for (let part = 0; ; part += 1) {
+    // デリミタ直後: "--" なら終端、"\r\n" ならパート開始
+    // (終端判定を先に行う — 上限パート数ちょうどの正当なボディを弾かない)
+    if (body.subarray(cursor, cursor + 2).toString('latin1') === '--') return { fields, files };
     if (part >= MULTIPART_MAX_PARTS) {
       throw multipartInvalid('multipart/form-data のパート数が多すぎます');
     }
-    // デリミタ直後: "--" なら終端、"\r\n" ならパート開始
-    if (body.subarray(cursor, cursor + 2).toString('latin1') === '--') return { fields, files };
     if (body.subarray(cursor, cursor + 2).toString('latin1') !== '\r\n') {
       throw multipartInvalid('multipart/form-data の形式が不正です');
     }
@@ -179,7 +188,8 @@ export async function readMultipartFormBody(
     const rawFileName = dispositionParam(disposition, 'filename');
 
     const contentStart = headerEnd + 4;
-    // パート本文は「\r\n + デリミタ」まで(本文中に CRLF を含んでも安全)
+    // パート本文は「\r\n + デリミタ」まで(本文中の CRLF 単体は保全される。
+    // 「CRLF + デリミタ」と完全一致する本文は関数ドキュメント記載のとおり全体拒否)
     const next = body.indexOf(Buffer.concat([Buffer.from('\r\n'), delimiter]), contentStart);
     if (next === -1) throw multipartInvalid('multipart/form-data の終端がありません');
     const content = body.subarray(contentStart, next);
