@@ -5,6 +5,7 @@ export * from './db.js';
 export * from './time.js';
 export * from './http.js';
 export * from './google-auth.js';
+export * from './calendar.js';
 export * from './drive.js';
 export * from './vertex.js';
 export * from './chat-api.js';

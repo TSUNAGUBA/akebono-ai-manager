@@ -16,7 +16,7 @@
 | M3 タスクオーケストレーション | **実装済み** | 管理者の指示検知(明示プレフィックス確定+flash-lite 分類)→ pro で分解(subtasks/工数/期限/担当案)→ 承認カード → 担当へ DM 配信 → 対話からの進捗自動更新(着手・完了) |
 | M6 異常シグナル検知 | **実装済み** | anomaly-scan バッチ(平日 09:30): 停滞・過負荷・仮説表明率の急落を決定的 SQL+閾値で検知、クールダウン付き起票+管理者通知 |
 | M6 裁定ナレッジ還流 | **実装済み** | エスカレーションの「裁定を記録」→ resolution 保存 → decision_rules として rag へ embedding 付き還流(ADR-11) |
-| カレンダー連携(M2 拡張) | **実装済み(フラグ)** | ドメイン全体委任(SA キーレス、IAM signJwt)で本人の当日予定を取得し朝の問いかけへ反映 |
+| カレンダー連携(M2 拡張) | **実装済み(フラグ)** | ドメイン全体委任(SA キーレス、IAM signJwt)で本人の予定を取得し、朝の問いかけ(当日)と随時 QA の予定質問(v0.14: 当日/翌日/翌々日)へ反映。取得は shared/calendar.ts に共通化 |
 | v0.7 顧客マスタ情報の回答参照 | **実装済み** | 随時 QA で対象顧客のマスタ情報(名称・所属業界・1ホップの顧客間関係)を SoT(ops マスタ)から毎回直接取得し「顧客マスタ情報」ブロックとしてプロンプトへ供給(ADR-13)。対象顧客の特定は「①質問文の名称照合 ②対話文脈」の優先順に改訂(v0.7 §4)。取得失敗は非ブロッキング(ナレッジのみで回答継続) |
 | v0.10 プロジェクト計画情報・タスク進捗管理・AI 文脈供給 | **実装済み** | projects に内容・目的(任意列)+project_milestones(migration 0009)。プロジェクト編集ページでマイルストーン CRUD・所属タスクの状態更新(task_status_log へ changed_via='admin' で記録。起票は M3 が SoT のまま — ADR-16)。計画情報を朝の問いかけ/状況確認/QA のプロンプトへ SoT 直接参照で供給(shared/project-context.ts。未入力項目は省略)。QA の対象プロジェクト特定は顧客特定と同じ優先順で独立に実施 |
 | v0.11 ナレッジ同期の診断性・PDF・規約撤廃・フォーム改善 | **実装済み** | Drive ショートカットの実体解決(共有を引き継がない制約は UI 警告+同期ログで可視化。未解決時はチャンク掃除をスキップ — 原則2)、ナレッジ管理ページに同期対象フォルダへの導線。PDF 投入(バイナリのまま Drive 保存・3MB)+同期時のローカルテキスト抽出(unpdf — ADR-17。テキスト層なしはスキップ+警告)。ファイル名の文字種制限を撤廃(日本語名可・失敗名の受け渡しを JSON 化)。管理 UI の textarea 独立行化・date/file 入力のスタイル統一・PRG リダイレクトのセクションアンカー+sticky バナー |
@@ -24,6 +24,7 @@
 | v0.8 問いかけ対象のユーザー単位設定 | **実装済み** | ops.users.checkin_enabled(migration 0007。既存行は member=可 / admin=不可で初期化 — 従来動作の保存)。morning/adhoc-checkin の対象クエリと状況確認画面をロール固定からフラグへ変更。管理者限定 /admin/users で可否を切替(監査ログ・CSRF)。ai_manager_admin_rw へ ops.users の列単位 GRANT(ADR-14) |
 | v0.12 対話の終了制御・エスカレーション解決導線・プロジェクトナレッジ・会話履歴参照・ジョブ手動実行・対話フィードバック | **実装済み** | 朝・夕対話のターン数上限(11/10)+上限直前の締め指示注入(質問ループの終了制御)。管理者限定 /admin/escalations(回答送信/裁定/回答不要/再還流 — 実行主体は batch の escalation-action ジョブ、ADR-18)。Drive 規約 project/{ID}/ → doc_type=project_doc のプロジェクトナレッジ(migration 0010。QA は対象プロジェクト特定時のみ検索対象に含める)。随時 QA へ直近 24h・末尾 12 ターンの会話履歴を供給。管理者限定 /admin/jobs から全定時ジョブ+日次 ETL の手動実行(dwh.run_daily_etl を SECURITY DEFINER 化し app_rw へ実行権限のみ付与 — ADR-19)。管理者限定 /admin/dialogues で対話ログ確認+フィードバック → AI が謝罪+訂正 DM を送信し decision_rules へ還流(dialogue-feedback ジョブ、ADR-20) |
 | v0.13 顧客⇔プロジェクト相関の文脈供給 | **実装済み** | 随時 QA の「顧客マスタ情報」ブロック(v0.7/ADR-13)に対象顧客の登録プロジェクト一覧(名称・状態。進行中優先・最大10件)を追加。「{顧客}で進んでいるプロジェクトは?」のような顧客→プロジェクト方向の質問に SoT(ops.projects)直接参照で回答できる(未登録はその旨を明示) |
+| v0.14 随時 QA の Google カレンダー参照 | **実装済み(フラグ)** | 予定質問(予定/カレンダー/スケジュール)のルールベース検知+対象日解決(明後日 → 明日 → 当日の優先順 — 構造の判定を LLM にさせない v0.3 設計原則2)で、本人の対象日の予定をドメイン全体委任で取得し「カレンダー情報」ブロックとして随時 QA プロンプトへ供給。カレンダー取得は batch から shared/calendar.ts へ共通化(朝の問いかけ配信は当日を渡す互換ラッパーで従来どおり)。CALENDAR_ENABLED 無効・取得失敗・予定質問でない場合は従来動作(非ブロッキング)。DWD は既存の Step 7-6 設定のまま(ランタイム SA は 3 サービス共通のため追加委任は不要) |
 | v0.5 管理者発火の状況確認 | **実装済み** | 管理者限定 /admin/checkin(active メンバー一覧+当日の朝/状況確認の応答状況、個別・全員への送信)。配信は batch の adhoc-checkin ジョブ(OIDC 起動・1日1回ガードなし。DM 未登録と、朝の問いかけ/振り返りに応答中のメンバーはスキップ — 対話の横取り防止、v0.5 §2-5)。文面は flash-lite 生成+定型文フォールバックで、冒頭に管理者発火を明示。返信は adhoc_checkin 対話として ops.dialogues に保存され、仮説形成を要求しない軽量な継続で2〜3往復の自然クローズ(migration 0006 で dialogue_type と dwh.dim_dialogue_type を拡張) |
 
 ## 2. 段階運用の切り分け(フラグ一覧)
@@ -32,7 +33,7 @@
 
 | フラグ / 閾値 | 既定 | 内容 |
 |---|---|---|
-| `CALENDAR_ENABLED`(secret) | 無効 | 朝の問いかけへの予定反映。Workspace のドメイン全体委任が前提(deployment-setup.md Step 7-6) |
+| `CALENDAR_ENABLED`(secret) | 無効 | 朝の問いかけへの予定反映+随時 QA の予定質問への回答(v0.14)。Workspace のドメイン全体委任が前提(deployment-setup.md Step 7-6) |
 | `DASHBOARD_ADMIN_DB_ENABLED`(secret) | 無効 | マスタ管理 UI の書込接続(Step 7-7)。無効時は案内表示 |
 | `KNOWLEDGE_SCOPE_HOPS`(secret) | 1 | 関係グラフの探索ホップ数(最大 2) |
 | `KNOWLEDGE_SCOPE_FALLBACK`(secret) | exclude-customer | 対象顧客が特定できない場合の動作(`all` で v0.2 互換の全域検索) |
@@ -226,7 +227,7 @@
 | dashboard → batch(エスカレーション解決・対話フィードバック・ジョブ手動実行) | 「今すぐ同期」と同じ OIDC ID トークン+Cloud Run IAM+BATCH_INVOKER_SA 照合。加えて batch 側で操作者(operatorUserId)が active な管理者であることを ops.users で検証(多層防御 — ADR-18) |
 | dashboard → Drive(ナレッジ投入・削除) | ランタイム SA 自身のトークン(scope: drive。DWD 不使用)。SA が書込めるのは「編集者」で共有されたフォルダのみで、実効権限境界は Drive の共有 ACL(v0.4 §2)。削除はゴミ箱移動(復元可能) |
 | dashboard → batch(今すぐ同期) | OIDC ID トークン(audience=batch URL)+Cloud Run IAM(roles/run.invoker)+batch アプリ層の BATCH_INVOKER_SA 照合の多層防御 |
-| batch → 本人カレンダー | ドメイン全体委任(calendar.readonly のみ)。SA キー不発行(IAM signJwt)。委任スコープは Workspace 管理者が制御 |
+| batch / chat-gateway → 本人カレンダー | ドメイン全体委任(calendar.readonly のみ)。SA キー不発行(IAM signJwt)。委任スコープは Workspace 管理者が制御。随時 QA(v0.14)の委任 subject は常に質問者本人(他人の予定は参照しない) |
 | chat-gateway → タスク起票 | 管理者ロールのみ指示可能。承認カードの操作も role=admin を検証。分解結果は status=proposed で人間の承認が必須(AI は配信しない) |
 
 ## 5. 既知の制約(Phase 3 への引き継ぎ)

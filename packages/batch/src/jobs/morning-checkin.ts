@@ -1,5 +1,6 @@
 import {
   fetchProjectContextForUser,
+  fetchTodayEventsText,
   generateContent,
   isJstWeekday,
   jstDateString,
@@ -11,7 +12,6 @@ import {
   SYSTEM_PROMPT,
 } from '@ai-manager/shared';
 import type pg from 'pg';
-import { fetchTodayEventsText } from '../calendar.js';
 
 export interface JobSummary {
   sent: number;
