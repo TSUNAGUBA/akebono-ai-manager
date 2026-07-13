@@ -49,14 +49,18 @@ export async function resolveKnowledgeScope(
 
 /**
  * 質問の文脈から対象顧客を特定する(要件 v0.3 §4.3 を v0.7 §4 で改訂)。
- * 優先順: ①質問文中の顧客名/ID のマスタ照合(明示的な言及を最優先)
+ * 優先順: ①質問文中の顧客名/ID/エイリアスのマスタ照合(明示的な言及を最優先)
  *        ②対話文脈のプロジェクト顧客(呼び出し元が渡す)。
  * v0.3 では②①の順だったが、別顧客のタスクに着手中のメンバーが顧客名を明示して
  * 質問した際に、文脈顧客がスコープを誤った顧客側へ固定する失敗モードがあったため、
  * 明示一致を優先する順序へ変更した(v0.7 §4)。
- * 複数一致時は最長一致(より具体的な名前)を採用する。
- * 照合の堅牢化: 顧客名/ID の LIKE メタ文字(% _ \)をエスケープしてパターン誤解釈を防ぎ、
- * 1文字の名前(「A」等)による過剰一致を避けるため length(name) >= 2 の顧客のみ照合する。
+ * 照合対象は名称・顧客ID・エイリアス(ops.customer_aliases)の UNION(v0.9 §4)。
+ * 「株式会社しまむら」のような法人格付きの登録名は質問文に部分一致しないため、
+ * 通称(「しまむら」)をエイリアスとして登録して照合できるようにする。
+ * 複数一致時は最長一致(より具体的な表記)を採用する。
+ * 照合の堅牢化: LIKE メタ文字(% _ \)をエスケープしてパターン誤解釈を防ぎ、
+ * 1文字の表記(「A」等)による過剰一致を避けるため 2 文字以上のみ照合する
+ * (エイリアスは DDL の CHECK でも 2 文字以上を担保)。
  */
 export async function identifyTargetCustomer(
   pool: pg.Pool,
@@ -64,24 +68,32 @@ export async function identifyTargetCustomer(
   contextCustomerId?: string | null,
 ): Promise<string | undefined> {
   try {
-    const result = await query<{ customer_id: string; name: string }>(
+    const result = await query<{ customer_id: string; match_text: string }>(
       pool,
       `WITH candidates AS (
-         SELECT customer_id, name,
-                replace(replace(replace(name, '\\', '\\\\'), '%', '\\%'), '_', '\\_') AS name_pattern,
-                replace(replace(replace(customer_id, '\\', '\\\\'), '%', '\\%'), '_', '\\_') AS id_pattern
-           FROM ops.customers
-          WHERE length(name) >= 2
+         SELECT customer_id, name AS match_text FROM ops.customers WHERE length(name) >= 2
+         UNION ALL
+         SELECT customer_id, customer_id AS match_text FROM ops.customers WHERE length(customer_id) >= 2
+         UNION ALL
+         SELECT customer_id, alias AS match_text FROM ops.customer_aliases
+       ),
+       escaped AS (
+         SELECT customer_id, match_text,
+                replace(replace(replace(match_text, '\\', '\\\\'), '%', '\\%'), '_', '\\_') AS pattern
+           FROM candidates
        )
-       SELECT customer_id, name FROM candidates
-        WHERE ($1 ILIKE '%' || name_pattern || '%' OR $1 ILIKE '%' || id_pattern || '%')
-        ORDER BY length(name) DESC
+       SELECT customer_id, match_text FROM escaped
+        WHERE $1 ILIKE '%' || pattern || '%'
+        ORDER BY length(match_text) DESC
         LIMIT 1`,
       [text],
     );
     const row = result.rows[0];
     if (row !== undefined) {
-      logger.debug('質問文から対象顧客を特定しました', { customerId: row.customer_id });
+      logger.debug('質問文から対象顧客を特定しました', {
+        customerId: row.customer_id,
+        matchedText: row.match_text,
+      });
       return row.customer_id;
     }
   } catch (err) {

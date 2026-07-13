@@ -90,16 +90,29 @@ describe('identifyTargetCustomer(対象顧客の特定・v0.7 §4 の優先順)'
 
   it('優先順①のマスタ照合は質問文を $1 に渡し、最長一致・エスケープ済みで照合する', async () => {
     const { pool, calls } = createMockPool(() => ({
-      rows: [{ customer_id: 'shimamura', name: 'しまむら' }],
+      rows: [{ customer_id: 'shimamura', match_text: 'しまむら' }],
     }));
     const id = await identifyTargetCustomer(pool, 'しまむらの在庫連携の仕様は?');
 
     expect(id).toBe('shimamura');
     const call = findCall(calls, 'FROM ops.customers');
     expect(call?.params).toEqual(['しまむらの在庫連携の仕様は?']);
-    expect(call?.text).toContain('ILIKE'); // 名称の部分一致照合
+    expect(call?.text).toContain('ILIKE'); // 部分一致照合
     expect(call?.text).toContain('length(name) >= 2'); // 1文字名の過剰一致防止
-    expect(call?.text).toContain('ORDER BY length(name) DESC'); // 最長一致を採用
+    expect(call?.text).toContain('ORDER BY length(match_text) DESC'); // 最長一致を採用
+  });
+
+  it('照合対象は名称・顧客ID・エイリアスの UNION(v0.9: 「株式会社しまむら」を「しまむら」で特定)', async () => {
+    const { pool, calls } = createMockPool(() => ({
+      rows: [{ customer_id: 'shimamura', match_text: 'しまむら' }],
+    }));
+    const id = await identifyTargetCustomer(pool, 'しまむらの取引先は?');
+
+    expect(id).toBe('shimamura');
+    const call = findCall(calls, 'FROM ops.customers');
+    expect(call?.text).toContain('ops.customer_aliases'); // エイリアスも照合対象
+    expect(call?.text).toContain('UNION ALL');
+    expect(call?.text).toContain('customer_id AS match_text'); // 顧客IDでも照合できる(従来互換)
   });
 
   it('優先順②: 質問文に一致がなければ対話文脈の顧客 ID にフォールバックする', async () => {

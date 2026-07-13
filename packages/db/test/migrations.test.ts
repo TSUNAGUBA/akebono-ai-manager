@@ -94,6 +94,66 @@ describe('migration 0007(問いかけ可否のユーザー単位設定)', () => 
     expect(grants).not.toContain('GRANT UPDATE ON ops.users');
   });
 
+  it('admin_rw はプロジェクト管理(v0.9)用に ops.projects の参照・書込を持つ(削除は付与しない)', async () => {
+    const grants = await read('etl/30_grants.sql');
+    const adminBlock = grants.slice(grants.indexOf('ai_manager_admin_rw:'));
+    expect(adminBlock).toContain('ops.projects');
+    // DELETE を含む GRANT 文のテーブル列挙に ops.projects が現れないこと
+    // (文字列 'DELETE ON ops.projects' の照合では列挙形式の GRANT を検出できないため、
+    //  コメント行を除いた文単位で検証する)
+    const statements = adminBlock
+      .split(';')
+      .map((stmt) =>
+        stmt
+          .split('\n')
+          .filter((line) => !line.trim().startsWith('--'))
+          .join('\n'),
+      );
+    const deleteStatements = statements.filter(
+      (stmt) => stmt.includes('GRANT') && stmt.includes('DELETE'),
+    );
+    expect(deleteStatements.length).toBeGreaterThan(0);
+    for (const stmt of deleteStatements) {
+      expect(stmt, 'DELETE 付与の GRANT 文に ops.projects を含めない').not.toContain('ops.projects');
+    }
+    // customer_aliases への UPDATE は付与しない(洗い替えに不要 — v0.9 §4.1 と一致)
+    const updateStatements = statements.filter(
+      (stmt) => stmt.includes('GRANT') && stmt.includes('UPDATE'),
+    );
+    for (const stmt of updateStatements) {
+      expect(stmt, 'UPDATE 付与の GRANT 文に customer_aliases を含めない').not.toContain(
+        'ops.customer_aliases',
+      );
+    }
+  });
+
+  it('verify-grants.sql は v0.8/v0.9 の権限変更(projects・aliases・users 列単位)を検証対象に含む', async () => {
+    const verify = await readFile(
+      path.join(packageRoot, '..', '..', 'scripts', 'setup', 'verify-grants.sql'),
+      'utf8',
+    );
+    expect(verify).toContain(`('ops.projects')`);
+    expect(verify).toContain(`('ops.customer_aliases')`);
+    expect(verify).toContain('has_column_privilege'); // ops.users の列単位検証(v0.8)
+    expect(verify).toContain(`'checkin_enabled', 'UPDATE'`);
+  });
+
+  it('customer_aliases(v0.9)は dashboard_ro が参照でき、admin_rw が洗い替え(INSERT/DELETE)できる', async () => {
+    const migration = await read('migrations/0008_customer_aliases.sql');
+    expect(migration).toContain('CREATE TABLE ops.customer_aliases');
+    expect(migration).toContain('length(alias) >= 2'); // 過剰一致防止(照合ルールと同一)
+    expect(migration).toContain('PRIMARY KEY (customer_id, alias)');
+
+    const grants = await read('etl/30_grants.sql');
+    const roBlock = grants.slice(
+      grants.indexOf('ai_manager_dashboard_ro:'),
+      grants.indexOf('ai_manager_admin_rw:'),
+    );
+    expect(roBlock).toContain('ops.customer_aliases');
+    const adminBlock = grants.slice(grants.indexOf('ai_manager_admin_rw:'));
+    expect(adminBlock).toContain('ops.customer_aliases');
+  });
+
   it('seed テンプレートは checkin_enabled を初期投入のみ設定し、ON CONFLICT で上書きしない', async () => {
     const seed = await readFile(
       path.join(packageRoot, '..', '..', 'scripts', 'setup', 'seed-users.sample.sql'),

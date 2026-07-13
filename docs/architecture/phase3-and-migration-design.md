@@ -21,6 +21,11 @@
 
 ## 2. 顧客エイリアス(別名照合)— v0.3 §4.3 の中期対応
 
+> **実装済み(v0.9 §4・2026-07-13):** 本節の設計は migration 0008+identifyTargetCustomer の
+> UNION 拡張+顧客編集フォームのエイリアス入力(読点・カンマ区切り)として実装された。
+> 実装との差分: 候補 CTE は customers(name)∪ customers(customer_id)∪ customer_aliases(alias)
+> の 3 系統(従来の顧客 ID 照合を維持するため)。GRANT は 30_grants.sql に追記済み。
+
 **目的**: 「株式会社しまむら」登録でも「しまむらの件」で顧客特定できるようにする。
 
 設計:

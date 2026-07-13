@@ -111,4 +111,18 @@ describe('状況確認(adhoc_checkin)への返信の継続(v0.5)', () => {
     expect(findCall(calls, 'INSERT INTO ops.dialogues')).toBeUndefined(); // 新規対話(QA)を作らない
     expect(findCall(calls, 'UPDATE ops.dialogues')).toBeDefined();
   });
+
+  it('応答生成が失敗しても返信ターンを保存し、フォールバック文言で応答する(v0.9 §5)', async () => {
+    mocks.generateContent.mockRejectedValueOnce(new Error('llm down'));
+    const { pool, calls } = createMockPool(responder);
+
+    const response = await handleMessage(pool, messageEvent('進捗は半分です'), member);
+
+    // 汎用エラー(処理中にエラーが発生しました)にせず、返信を記録した上で定型文を返す
+    expect(response.text).toContain('一時的に失敗');
+    expect(response.text).toContain('記録しています');
+    const update = findCall(calls, 'UPDATE ops.dialogues');
+    expect(update?.params[0]).toBe('55');
+    expect(String(update?.params[1])).toContain('進捗は半分です'); // 返信は失われない
+  });
 });

@@ -75,6 +75,40 @@ import { fetchCustomerContext } from '../services/customer-context.js';
 
 const MAX_CONTEXT_TURNS = 12;
 
+/** 対話継続の応答生成に失敗したときのフォールバック文言(v0.9 §5)。 */
+const DIALOGUE_FALLBACK_REPLY =
+  'すみません、応答の生成に一時的に失敗しました。いただいた返信は記録しています。少し時間をおいて、続きをそのまま送ってください。';
+
+/**
+ * 対話継続(朝・夕・状況確認)の応答生成が失敗したとき、ユーザーの返信ターンを
+ * フォールバック応答とともに保存した上で、定型文で応答する(v0.9 §5)。
+ * 配信側(morning/adhoc-checkin ジョブ)には定型文フォールバックがあるのに、
+ * 継続側は例外がそのまま伝播して汎用エラーになり、返信テキストが記録されず
+ * 失われていた(記録系データの保護 — 開発原則 2 の観点で改修)。
+ * AI 側のフォールバックターンも保存し、対話履歴の user/model の交互性を保つ。
+ * 保存まで失敗した場合のみ例外を伝播させる(返信が記録できておらず、
+ * 汎用エラー文言でユーザーへ再送を促す必要があるため)。
+ */
+async function recoverDialogueContinuation(
+  pool: pg.Pool,
+  dialogue: DialogueRow,
+  text: string,
+  err: unknown,
+): Promise<ChatAppMessage> {
+  // 既知の制約: adhoc_checkin の最終往復(turns = 上限-2)で失敗した場合、フォールバックの
+  // 2 ターンで上限に達して対話がクローズし、次のメッセージは QA として処理される
+  // (返信は保存済みでデータ消失はない。v0.9 §5.1 に明記した許容トレードオフ)
+  logger.error('対話継続の応答生成に失敗しました(返信ターンを保存してフォールバック)', err, {
+    dialogueId: dialogue.dialogue_id,
+    dialogueType: dialogue.dialogue_type,
+  });
+  await appendTurns(pool, dialogue, [
+    nowTurn('user', text),
+    nowTurn('ai', DIALOGUE_FALLBACK_REPLY),
+  ]);
+  return { text: DIALOGUE_FALLBACK_REPLY };
+}
+
 /** 対話ターンを LLM のメッセージ形式に変換する。 */
 function turnsToMessages(turns: DialogueTurn[], latestUserText: string): ChatTurn[] {
   const history = turns
@@ -111,13 +145,23 @@ async function continueMorningDialogue(
   dialogue: DialogueRow,
   text: string,
 ): Promise<ChatAppMessage> {
-  const tasks = await openTasksSummary(pool, user.user_id);
-  const { value, result } = await generateJson<MorningLlmResponse>({
-    tier: 'pro',
-    system: `${SYSTEM_PROMPT}\n\n${MORNING_DIALOGUE_INSTRUCTION}\n\n## 本人のタスク状況\n${tasks}`,
-    messages: turnsToMessages(dialogue.turns, text),
-    responseSchema: MORNING_RESPONSE_SCHEMA as unknown as Record<string, unknown>,
+  // タスク状況は補助文脈のため、取得失敗でも返信の処理を止めない(v0.9 §5・原則4)
+  const tasks = await openTasksSummary(pool, user.user_id).catch((err: unknown) => {
+    logger.error('タスク状況の取得に失敗しました(タスク文脈なしで継続)', err);
+    return '(タスク状況を取得できませんでした)';
   });
+  let value: MorningLlmResponse;
+  let result: { model: string; inputTokens: number; outputTokens: number; costUsd: number };
+  try {
+    ({ value, result } = await generateJson<MorningLlmResponse>({
+      tier: 'pro',
+      system: `${SYSTEM_PROMPT}\n\n${MORNING_DIALOGUE_INSTRUCTION}\n\n## 本人のタスク状況\n${tasks}`,
+      messages: turnsToMessages(dialogue.turns, text),
+      responseSchema: MORNING_RESPONSE_SCHEMA as unknown as Record<string, unknown>,
+    }));
+  } catch (err) {
+    return recoverDialogueContinuation(pool, dialogue, text, err);
+  }
 
   const update =
     value.hypothesis_complete && value.hypothesis !== undefined
@@ -168,13 +212,22 @@ async function continueAdhocCheckinDialogue(
   dialogue: DialogueRow,
   text: string,
 ): Promise<ChatAppMessage> {
-  const tasks = await openTasksSummary(pool, user.user_id);
-  // 構造化抽出が不要な軽量対話のため、pro ではなく flash のプレーンテキスト生成で応答する
-  const result = await generateContent({
-    tier: 'flash',
-    system: `${SYSTEM_PROMPT}\n\n${ADHOC_CHECKIN_DIALOGUE_INSTRUCTION}\n\n## 本人のタスク状況\n${tasks}`,
-    messages: turnsToMessages(dialogue.turns, text),
+  // タスク状況は補助文脈のため、取得失敗でも返信の処理を止めない(v0.9 §5・原則4)
+  const tasks = await openTasksSummary(pool, user.user_id).catch((err: unknown) => {
+    logger.error('タスク状況の取得に失敗しました(タスク文脈なしで継続)', err);
+    return '(タスク状況を取得できませんでした)';
   });
+  // 構造化抽出が不要な軽量対話のため、pro ではなく flash のプレーンテキスト生成で応答する
+  let result: Awaited<ReturnType<typeof generateContent>>;
+  try {
+    result = await generateContent({
+      tier: 'flash',
+      system: `${SYSTEM_PROMPT}\n\n${ADHOC_CHECKIN_DIALOGUE_INSTRUCTION}\n\n## 本人のタスク状況\n${tasks}`,
+      messages: turnsToMessages(dialogue.turns, text),
+    });
+  } catch (err) {
+    return recoverDialogueContinuation(pool, dialogue, text, err);
+  }
 
   await appendTurns(pool, dialogue, [nowTurn('user', text), nowTurn('ai', result.text)], {
     modelUsed: result.model,
@@ -204,18 +257,30 @@ async function continueEveningDialogue(
   dialogue: DialogueRow,
   text: string,
 ): Promise<ChatAppMessage> {
-  const morning = await findMorningDialogue(pool, user.user_id, jstDateString());
+  // 今朝の対話は補助文脈のため、取得失敗でも処理を止めない(v0.9 §5・原則4)
+  const morning = await findMorningDialogue(pool, user.user_id, jstDateString()).catch(
+    (err: unknown) => {
+      logger.error('今朝の対話の取得に失敗しました(仮説の文脈なしで継続)', err);
+      return undefined;
+    },
+  );
   const hypothesisContext =
     morning?.hypothesis == null
       ? '(今朝の仮説は記録されていません)'
       : JSON.stringify(morning.hypothesis);
 
-  const { value, result } = await generateJson<EveningLlmResponse>({
-    tier: 'pro',
-    system: `${SYSTEM_PROMPT}\n\n${EVENING_DIALOGUE_INSTRUCTION}\n\n## 今朝の仮説\n${hypothesisContext}`,
-    messages: turnsToMessages(dialogue.turns, text),
-    responseSchema: EVENING_RESPONSE_SCHEMA as unknown as Record<string, unknown>,
-  });
+  let value: EveningLlmResponse;
+  let result: { model: string; inputTokens: number; outputTokens: number; costUsd: number };
+  try {
+    ({ value, result } = await generateJson<EveningLlmResponse>({
+      tier: 'pro',
+      system: `${SYSTEM_PROMPT}\n\n${EVENING_DIALOGUE_INSTRUCTION}\n\n## 今朝の仮説\n${hypothesisContext}`,
+      messages: turnsToMessages(dialogue.turns, text),
+      responseSchema: EVENING_RESPONSE_SCHEMA as unknown as Record<string, unknown>,
+    }));
+  } catch (err) {
+    return recoverDialogueContinuation(pool, dialogue, text, err);
+  }
 
   const update =
     value.review_complete && value.review !== undefined
@@ -254,18 +319,42 @@ async function startEveningDialogue(
   user: OpsUser,
   text: string,
 ): Promise<ChatAppMessage> {
-  const morning = await findMorningDialogue(pool, user.user_id, jstDateString());
+  // 今朝の対話は補助文脈のため、取得失敗でも処理を止めない(v0.9 §5・原則4)
+  const morning = await findMorningDialogue(pool, user.user_id, jstDateString()).catch(
+    (err: unknown) => {
+      logger.error('今朝の対話の取得に失敗しました(仮説の文脈なしで継続)', err);
+      return undefined;
+    },
+  );
   const hypothesisContext =
     morning?.hypothesis == null
       ? '(今朝の仮説は記録されていません)'
       : JSON.stringify(morning.hypothesis);
 
-  const { value, result } = await generateJson<EveningLlmResponse>({
-    tier: 'pro',
-    system: `${SYSTEM_PROMPT}\n\n${EVENING_DIALOGUE_INSTRUCTION}\n\n## 今朝の仮説\n${hypothesisContext}`,
-    messages: [{ role: 'user', text }],
-    responseSchema: EVENING_RESPONSE_SCHEMA as unknown as Record<string, unknown>,
-  });
+  let value: EveningLlmResponse;
+  let result: { model: string; inputTokens: number; outputTokens: number; costUsd: number };
+  try {
+    ({ value, result } = await generateJson<EveningLlmResponse>({
+      tier: 'pro',
+      system: `${SYSTEM_PROMPT}\n\n${EVENING_DIALOGUE_INSTRUCTION}\n\n## 今朝の仮説\n${hypothesisContext}`,
+      messages: [{ role: 'user', text }],
+      responseSchema: EVENING_RESPONSE_SCHEMA as unknown as Record<string, unknown>,
+    }));
+  } catch (err) {
+    // 継続時(recoverDialogueContinuation)と同じ設計: 完了申告のテキストを失わない(v0.9 §5)。
+    // open な completion_review として保存されるため、次のメッセージで振り返りを継続できる
+    logger.error('夕の振り返りの応答生成に失敗しました(申告ターンを保存してフォールバック)', err, {
+      userId: user.user_id,
+    });
+    await createDialogue(pool, {
+      userId: user.user_id,
+      dialogueType: 'completion_review',
+      turns: [nowTurn('user', text), nowTurn('ai', DIALOGUE_FALLBACK_REPLY)],
+      taskId: morning?.task_id ?? null,
+      projectId: morning?.project_id ?? null,
+    });
+    return { text: DIALOGUE_FALLBACK_REPLY };
+  }
 
   await createDialogue(pool, {
     userId: user.user_id,
@@ -325,22 +414,40 @@ async function answerAdhocQuestion(
   // 優先順(v0.7 §4)①: 質問文の名称照合(明示的な言及を最優先) ②: 対話文脈のプロジェクト顧客
   const contextCustomerId = await findContextCustomerId(pool, user.user_id);
   const targetCustomerId = await identifyTargetCustomer(pool, text, contextCustomerId);
-  const scope =
-    targetCustomerId !== undefined
-      ? await resolveKnowledgeScope(pool, targetCustomerId)
-      : scopeFallbackMode() === 'all'
-        ? undefined
-        : ('exclude-customer' as const);
+
+  // スコープ導出の失敗は QA を止めず、安全側(顧客固有の除外)に倒す(v0.9 §5・原則4)
+  let scope: Awaited<ReturnType<typeof resolveKnowledgeScope>> | 'exclude-customer' | undefined;
+  if (targetCustomerId !== undefined) {
+    try {
+      scope = await resolveKnowledgeScope(pool, targetCustomerId);
+    } catch (err) {
+      logger.error('ナレッジスコープの導出に失敗しました(顧客固有を除外して継続)', err, {
+        targetCustomerId,
+      });
+      scope = 'exclude-customer';
+    }
+  } else {
+    scope = scopeFallbackMode() === 'all' ? undefined : ('exclude-customer' as const);
+  }
 
   // 顧客マスタ情報(v0.7 §3): 対象顧客の業界・顧客間関係を SoT(ops マスタ)から
-  // 直接取得してプロンプトに供給する(取得失敗は非ブロッキングで undefined)
+  // 直接取得してプロンプトに供給する(取得失敗は非ブロッキングで undefined)。
+  // ナレッジ検索(embedding 依存)の失敗も QA を止めず、参考情報なしで継続する(v0.9 §5)
   const [chunks, analogies, customerContext] = await Promise.all([
     searchKnowledge(pool, text, {
       docTypes: ['customer_profile', 'glossary', 'domain_ops', 'decision_rules'],
       limit: 5,
       scope,
+    }).catch((err: unknown) => {
+      logger.error('ナレッジ検索に失敗しました(参考情報なしで継続)', err);
+      return [];
     }),
-    /例え|たとえ/.test(text) ? searchAnalogies(pool, text) : Promise.resolve([]),
+    /例え|たとえ/.test(text)
+      ? searchAnalogies(pool, text).catch((err: unknown) => {
+          logger.error('例え話の検索に失敗しました(few-shot なしで継続)', err);
+          return [];
+        })
+      : Promise.resolve([]),
     targetCustomerId !== undefined
       ? fetchCustomerContext(pool, targetCustomerId)
       : Promise.resolve(undefined),
@@ -371,9 +478,13 @@ async function answerAdhocQuestion(
   });
 
   if (value.confidence === 'low') {
+    // 対象顧客の特定結果を診断情報として残す(v0.9 §4: 「マスタ登録済みなのに未登録と
+    // 回答される」事象の切り分け — 特定失敗ならエイリアス/名称登録、特定済みなら関係登録を疑う)
+    const targetInfo =
+      targetCustomerId ?? '(特定できず — 顧客マスタの名称・エイリアスと質問文が不一致の可能性)';
     await raiseEscalation(pool, {
       reason: 'low_confidence',
-      context: `質問(${user.display_name}): ${text}\nAI回答(確信度低): ${value.answer}`,
+      context: `質問(${user.display_name}): ${text}\n対象顧客: ${targetInfo}\nAI回答(確信度低): ${value.answer}`,
       relatedUserId: user.user_id,
     });
     return {
@@ -625,10 +736,13 @@ async function handleAwaitingResolutionMessage(
 
 /**
  * MESSAGE イベントのハンドラ。
- * 優先順: 裁定の受領(管理者) → 提案理由の受領 → 進行中の朝夕対話・状況確認の継続
- *        → タスク指示の検知(管理者) → 完了申告の検知 → 随時 QA
- * (進行中対話の継続をタスク指示検知より先に評価し、朝夕対話の途中のメッセージが
- *  タスク起票に横取りされないようにする)
+ * 優先順(v0.9 §3 で改訂): 裁定の受領(管理者) → 提案理由の受領
+ *        → 明示的なタスク指示(管理者・ルールベース確定シグナルのみ)
+ *        → 進行中の朝夕対話・状況確認の継続 → 曖昧なタスク指示の分類(管理者)
+ *        → 完了申告の検知 → 随時 QA
+ * 「タスク:」等の明示的な指示は進行中対話より優先する(管理者が朝の問いかけに未返信でも
+ * タスク起票できる — v0.8 §3.4 の既知の制約の解消)。曖昧な「指示らしさ」では従来どおり
+ * 対話の継続を優先し、朝夕対話の途中のメッセージがタスク起票に横取りされないようにする。
  */
 export async function handleMessage(
   pool: pg.Pool,
@@ -659,7 +773,14 @@ export async function handleMessage(
     };
   }
 
-  // 進行中の朝夕対話・状況確認の継続を最優先で評価する(タスク指示検知による横取り防止)
+  // 明示的なタスク指示(「タスク:」等のルールベース確定シグナル)は進行中対話より優先する
+  // (v0.9 §3)。flash-lite 分類を要する曖昧なシグナルはここでは扱わず、後段の
+  // isTaskInstruction 評価に委ねる(誤起票より対話保護を優先)
+  if (user.role === 'admin' && detectTaskInstruction(text) === 'yes') {
+    return handleTaskInstruction(pool, user, text);
+  }
+
+  // 進行中の朝夕対話・状況確認の継続を評価する(曖昧なタスク指示検知による横取り防止)
   const open = await findOpenDialogue(pool, user.user_id, jstDateString());
   if (open !== undefined) {
     if (open.dialogue_type === 'morning_checkin') {
