@@ -71,6 +71,7 @@ import {
   resolveKnowledgeScope,
   scopeFallbackMode,
 } from '../services/knowledge-scope.js';
+import { fetchCustomerContext } from '../services/customer-context.js';
 
 const MAX_CONTEXT_TURNS = 12;
 
@@ -286,8 +287,9 @@ interface QaLlmResponse {
 }
 
 /**
- * 対話文脈のプロジェクト顧客(要件 v0.3 §4.3 の優先順①)を導出する:
+ * 対話文脈のプロジェクト顧客(v0.7 §4 の優先順②)を導出する:
  * 本人の直近の in_progress タスクが属するプロジェクトの顧客。
+ * 質問文に顧客名の明示一致がない場合のフォールバックとして使われる。
  * 文脈顧客は補助情報のため、取得失敗は無視して従来動作(質問文からの特定のみ)に倒す。
  */
 async function findContextCustomerId(pool: pg.Pool, userId: string): Promise<string | undefined> {
@@ -320,7 +322,7 @@ async function answerAdhocQuestion(
 
   // ナレッジスコープ(要件 v0.3 §4): 対象顧客を特定できたら 1 ホップの到達可能集合で絞り、
   // 特定できなければ既定で顧客固有を除外する(誤混入防止)。例え話は共通ナレッジのため対象外
-  // 優先順①: 対話文脈のプロジェクト顧客(本人の直近 in_progress タスク) ②: 質問文の名称照合
+  // 優先順(v0.7 §4)①: 質問文の名称照合(明示的な言及を最優先) ②: 対話文脈のプロジェクト顧客
   const contextCustomerId = await findContextCustomerId(pool, user.user_id);
   const targetCustomerId = await identifyTargetCustomer(pool, text, contextCustomerId);
   const scope =
@@ -330,15 +332,22 @@ async function answerAdhocQuestion(
         ? undefined
         : ('exclude-customer' as const);
 
-  const [chunks, analogies] = await Promise.all([
+  // 顧客マスタ情報(v0.7 §3): 対象顧客の業界・顧客間関係を SoT(ops マスタ)から
+  // 直接取得してプロンプトに供給する(取得失敗は非ブロッキングで undefined)
+  const [chunks, analogies, customerContext] = await Promise.all([
     searchKnowledge(pool, text, {
       docTypes: ['customer_profile', 'glossary', 'domain_ops', 'decision_rules'],
       limit: 5,
       scope,
     }),
     /例え|たとえ/.test(text) ? searchAnalogies(pool, text) : Promise.resolve([]),
+    targetCustomerId !== undefined
+      ? fetchCustomerContext(pool, targetCustomerId)
+      : Promise.resolve(undefined),
   ]);
 
+  const customerContextBlock =
+    customerContext === undefined ? '' : `\n\n## 顧客マスタ情報\n${customerContext}`;
   const analogyBlock =
     analogies.length === 0
       ? ''
@@ -346,7 +355,7 @@ async function answerAdhocQuestion(
 
   const { value, result } = await generateJson<QaLlmResponse>({
     tier,
-    system: `${SYSTEM_PROMPT}\n\n${ADHOC_QA_INSTRUCTION}\n\n## 参考情報\n${formatKnowledgeContext(chunks)}${analogyBlock}`,
+    system: `${SYSTEM_PROMPT}\n\n${ADHOC_QA_INSTRUCTION}${customerContextBlock}\n\n## 参考情報\n${formatKnowledgeContext(chunks)}${analogyBlock}`,
     messages: [{ role: 'user', text }],
     responseSchema: ADHOC_QA_RESPONSE_SCHEMA as unknown as Record<string, unknown>,
   });

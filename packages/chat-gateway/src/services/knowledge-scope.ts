@@ -48,8 +48,12 @@ export async function resolveKnowledgeScope(
 }
 
 /**
- * 質問の文脈から対象顧客を特定する(要件 v0.3 §4.3)。
- * 優先順: ①対話文脈のプロジェクト顧客(呼び出し元が渡す) ②質問文中の顧客名/ID のマスタ照合。
+ * 質問の文脈から対象顧客を特定する(要件 v0.3 §4.3 を v0.7 §4 で改訂)。
+ * 優先順: ①質問文中の顧客名/ID のマスタ照合(明示的な言及を最優先)
+ *        ②対話文脈のプロジェクト顧客(呼び出し元が渡す)。
+ * v0.3 では②①の順だったが、別顧客のタスクに着手中のメンバーが顧客名を明示して
+ * 質問した際に、文脈顧客がスコープを誤った顧客側へ固定する失敗モードがあったため、
+ * 明示一致を優先する順序へ変更した(v0.7 §4)。
  * 複数一致時は最長一致(より具体的な名前)を採用する。
  * 照合の堅牢化: 顧客名/ID の LIKE メタ文字(% _ \)をエスケープしてパターン誤解釈を防ぎ、
  * 1文字の名前(「A」等)による過剰一致を避けるため length(name) >= 2 の顧客のみ照合する。
@@ -59,28 +63,34 @@ export async function identifyTargetCustomer(
   text: string,
   contextCustomerId?: string | null,
 ): Promise<string | undefined> {
+  try {
+    const result = await query<{ customer_id: string; name: string }>(
+      pool,
+      `WITH candidates AS (
+         SELECT customer_id, name,
+                replace(replace(replace(name, '\\', '\\\\'), '%', '\\%'), '_', '\\_') AS name_pattern,
+                replace(replace(replace(customer_id, '\\', '\\\\'), '%', '\\%'), '_', '\\_') AS id_pattern
+           FROM ops.customers
+          WHERE length(name) >= 2
+       )
+       SELECT customer_id, name FROM candidates
+        WHERE ($1 ILIKE '%' || name_pattern || '%' OR $1 ILIKE '%' || id_pattern || '%')
+        ORDER BY length(name) DESC
+        LIMIT 1`,
+      [text],
+    );
+    const row = result.rows[0];
+    if (row !== undefined) {
+      logger.debug('質問文から対象顧客を特定しました', { customerId: row.customer_id });
+      return row.customer_id;
+    }
+  } catch (err) {
+    // 名称照合は補助的な特定手段のため、失敗しても QA を止めない(開発原則 4)。
+    // 文脈顧客があればそのスコープで、なければ呼び出し元のフォールバック動作で継続する
+    logger.error('顧客名のマスタ照合に失敗しました(対話文脈の顧客で継続)', err);
+  }
   if (contextCustomerId !== undefined && contextCustomerId !== null && contextCustomerId !== '') {
     return contextCustomerId;
-  }
-  const result = await query<{ customer_id: string; name: string }>(
-    pool,
-    `WITH candidates AS (
-       SELECT customer_id, name,
-              replace(replace(replace(name, '\\', '\\\\'), '%', '\\%'), '_', '\\_') AS name_pattern,
-              replace(replace(replace(customer_id, '\\', '\\\\'), '%', '\\%'), '_', '\\_') AS id_pattern
-         FROM ops.customers
-        WHERE length(name) >= 2
-     )
-     SELECT customer_id, name FROM candidates
-      WHERE ($1 ILIKE '%' || name_pattern || '%' OR $1 ILIKE '%' || id_pattern || '%')
-      ORDER BY length(name) DESC
-      LIMIT 1`,
-    [text],
-  );
-  const row = result.rows[0];
-  if (row !== undefined) {
-    logger.debug('質問文から対象顧客を特定しました', { customerId: row.customer_id });
-    return row.customer_id;
   }
   return undefined;
 }

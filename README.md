@@ -7,7 +7,7 @@
 いつものチャットに返事をするだけで、日報が自動で完成し、業務知識が即座に手に入り、
 「予想 → 実行 → 振り返り」の思考サイクルが無理なく回り始めます。
 
-- 📘 要件・基本設計: [docs/refference/ai-manager-requirements-design.md](docs/refference/ai-manager-requirements-design.md)(v0.2)+ [v0.3 追補(マスタ管理とナレッジスコープ)](docs/refference/ai-manager-requirements-v0.3-addendum.md)+ [v0.4 追補(ナレッジ管理 UI)](docs/refference/ai-manager-requirements-v0.4-addendum.md)+ [v0.5 追補(管理者発火の状況確認)](docs/refference/ai-manager-requirements-v0.5-addendum.md)+ [v0.6 追補(ナレッジのファイルアップロード投入)](docs/refference/ai-manager-requirements-v0.6-addendum.md)
+- 📘 要件・基本設計: [docs/refference/ai-manager-requirements-design.md](docs/refference/ai-manager-requirements-design.md)(v0.2)+ [v0.3 追補(マスタ管理とナレッジスコープ)](docs/refference/ai-manager-requirements-v0.3-addendum.md)+ [v0.4 追補(ナレッジ管理 UI)](docs/refference/ai-manager-requirements-v0.4-addendum.md)+ [v0.5 追補(管理者発火の状況確認)](docs/refference/ai-manager-requirements-v0.5-addendum.md)+ [v0.6 追補(ナレッジのファイルアップロード投入)](docs/refference/ai-manager-requirements-v0.6-addendum.md)+ [v0.7 追補(顧客マスタ情報の回答参照)](docs/refference/ai-manager-requirements-v0.7-addendum.md)
 - 📗 導入前後の変化(非エンジニア向け): [docs/refference/ai-manager-before-after-guide.md](docs/refference/ai-manager-before-after-guide.md)
 - 📙 Phase 1 実装設計・ADR: [docs/architecture/phase1-implementation.md](docs/architecture/phase1-implementation.md)
 - 🚀 デプロイ設定手順: [docs/operations/deployment-setup.md](docs/operations/deployment-setup.md)
@@ -18,7 +18,7 @@
 |---|---|
 | 朝の問いかけ(M2) | 平日朝、タスク状況を踏まえた3つの問いを DM で配信。答えるうちに仮説が言語化される |
 | 夕の振り返り(M2) | 完了報告を検知して「予想との差分」「次に変えること」を一緒に整理 |
-| 随時の質問対応(M1/M2) | 業務知識・専門用語を RAG(ナレッジベース)から即答。例え話ライブラリで腹落ちする説明 |
+| 随時の質問対応(M1/M2) | 業務知識・専門用語を RAG(ナレッジベース)から即答。顧客の取引先・所属業界などの構造はマスタから直接参照して回答(v0.7)。例え話ライブラリで腹落ちする説明 |
 | 日報・週報の自動生成(M4) | 対話ログから日報を自動生成、本人は確認ボタンを押すだけ。管理者には週次サマリ |
 | エスカレーション(M6) | AI が確信を持てない事項を管理者へ自動ルーティング |
 | 可視化ダッシュボード(M5) | プロジェクト横断の進捗、タスク負荷、個人の振り返り資産、成長観察(管理者限定)、AI コスト |

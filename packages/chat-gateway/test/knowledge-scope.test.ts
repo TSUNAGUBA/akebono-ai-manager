@@ -78,15 +78,17 @@ describe('resolveKnowledgeScope(到達可能集合の導出)', () => {
   });
 });
 
-describe('identifyTargetCustomer(対象顧客の特定)', () => {
-  it('優先順①: 対話文脈の顧客 ID があればマスタ照合せず即座に返す', async () => {
-    const { pool, calls } = createMockPool(() => ({ rows: [] }));
-    const id = await identifyTargetCustomer(pool, 'しまむら向けの納期は?', 'undeux');
-    expect(id).toBe('undeux');
-    expect(calls).toHaveLength(0); // SQL を発行しない
+describe('identifyTargetCustomer(対象顧客の特定・v0.7 §4 の優先順)', () => {
+  it('優先順①: 質問文中の顧客名の明示一致は、対話文脈の顧客より優先する', async () => {
+    // undeux のタスクに着手中でも、しまむらを明示した質問はしまむらを対象にする
+    const { pool } = createMockPool(() => ({
+      rows: [{ customer_id: 'shimamura', name: 'しまむら' }],
+    }));
+    const id = await identifyTargetCustomer(pool, 'しまむらの取引先は?', 'undeux');
+    expect(id).toBe('shimamura');
   });
 
-  it('優先順②: 文脈がなければ質問文を $1 に渡して顧客名/ID をマスタ照合する', async () => {
+  it('優先順①のマスタ照合は質問文を $1 に渡し、最長一致・エスケープ済みで照合する', async () => {
     const { pool, calls } = createMockPool(() => ({
       rows: [{ customer_id: 'shimamura', name: 'しまむら' }],
     }));
@@ -100,16 +102,33 @@ describe('identifyTargetCustomer(対象顧客の特定)', () => {
     expect(call?.text).toContain('ORDER BY length(name) DESC'); // 最長一致を採用
   });
 
-  it('文脈が null / 空文字なら文脈扱いせずマスタ照合に進む', async () => {
+  it('優先順②: 質問文に一致がなければ対話文脈の顧客 ID にフォールバックする', async () => {
     const { pool, calls } = createMockPool(() => ({ rows: [] }));
-    await identifyTargetCustomer(pool, '質問', null);
-    await identifyTargetCustomer(pool, '質問', '');
+    const id = await identifyTargetCustomer(pool, '納期の一般的な考え方は?', 'undeux');
+    expect(id).toBe('undeux');
+    expect(findCall(calls, 'FROM ops.customers')).toBeDefined(); // 照合を先に試みている
+  });
+
+  it('文脈が null / 空文字なら文脈フォールバックせず undefined を返す', async () => {
+    const { pool, calls } = createMockPool(() => ({ rows: [] }));
+    await expect(identifyTargetCustomer(pool, '質問', null)).resolves.toBeUndefined();
+    await expect(identifyTargetCustomer(pool, '質問', '')).resolves.toBeUndefined();
     expect(calls.filter((c) => c.text.includes('FROM ops.customers'))).toHaveLength(2);
   });
 
-  it('照合ヒットなしなら undefined(呼び出し元がフォールバック動作を選ぶ)', async () => {
+  it('照合ヒットも文脈もなければ undefined(呼び出し元がフォールバック動作を選ぶ)', async () => {
     const { pool } = createMockPool(() => ({ rows: [] }));
     await expect(identifyTargetCustomer(pool, '一般的な質問')).resolves.toBeUndefined();
+  });
+
+  it('照合クエリの失敗は QA を止めず、文脈顧客にフォールバックする(非ブロッキング)', async () => {
+    const { pool } = createMockPool(() => new Error('db down'));
+    await expect(identifyTargetCustomer(pool, 'しまむらの質問', 'undeux')).resolves.toBe('undeux');
+  });
+
+  it('照合クエリが失敗し文脈もなければ undefined(例外を伝播させない)', async () => {
+    const { pool } = createMockPool(() => new Error('db down'));
+    await expect(identifyTargetCustomer(pool, 'しまむらの質問')).resolves.toBeUndefined();
   });
 });
 

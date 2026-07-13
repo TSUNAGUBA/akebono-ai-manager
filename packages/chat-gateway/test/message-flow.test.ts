@@ -383,6 +383,102 @@ describe('裁定ゲートの入力ガード(M6: 無条件キャプチャ防止)'
   });
 });
 
+describe('随時 QA への顧客マスタ情報の供給(v0.7)', () => {
+  const shimamuraResponder: Responder = (text) => {
+    if (text.includes('FROM ops.suggestions')) return { rows: [] };
+    if (text.includes('INSERT INTO ops.dialogues')) {
+      return { rows: [{ dialogue_id: '31', created_at: new Date() }] };
+    }
+    if (text.includes('FROM ops.dialogues')) return { rows: [] };
+    // 文脈顧客: 本人は undeux のタスクに着手中(明示一致がこれを上書きすることを検証)
+    if (text.includes('FROM ops.tasks t')) return { rows: [{ customer_id: 'undeux' }] };
+    // 質問文の名称照合 → しまむら
+    if (text.includes('WITH candidates')) {
+      return { rows: [{ customer_id: 'shimamura', name: 'しまむら' }] };
+    }
+    if (text.includes('WITH RECURSIVE reach')) {
+      return { rows: [{ customer_ids: ['shimamura', 'undeux'], industry_ids: ['apparel'] }] };
+    }
+    if (text.includes('FROM ops.customers c')) {
+      return {
+        rows: [{ customer_id: 'shimamura', name: 'しまむら', industries: ['小売業', 'アパレル'] }],
+      };
+    }
+    if (text.includes('FROM ops.customer_relations')) {
+      return {
+        rows: [
+          {
+            from_name: 'undeux',
+            to_name: 'しまむら',
+            label: '納品先(メーカー→小売等)',
+            notes: null,
+          },
+        ],
+      };
+    }
+    return { rows: [] };
+  };
+
+  it('しまむらシナリオ: 明示一致した顧客のマスタ情報(業界・取引関係)をプロンプトに供給する', async () => {
+    mocks.generateJson.mockResolvedValueOnce({
+      value: { answer: 'しまむらの取引先は undeux です。', confidence: 'high' },
+      result: llmResult,
+    });
+    const { pool, calls } = createMockPool(shimamuraResponder);
+
+    const response = await handleMessage(pool, messageEvent('しまむらの取引先は?'), member);
+
+    // 明示一致(しまむら)が文脈顧客(undeux)より優先され、スコープもしまむら起点になる
+    expect(findCall(calls, 'WITH RECURSIVE reach')?.params).toEqual(['shimamura', 1]);
+
+    // プロンプトに顧客マスタ情報ブロック(業界+関係種別ラベル付きの関係)が入る
+    const genCall = mocks.generateJson.mock.calls[0]?.[0] as { system: string };
+    expect(genCall.system).toContain('## 顧客マスタ情報');
+    expect(genCall.system).toContain('しまむら(所属業界: 小売業、アパレル)');
+    expect(genCall.system).toContain('undeux → しまむら: 納品先(メーカー→小売等)');
+    expect(genCall.system).toContain('## 参考情報'); // ナレッジの参考情報ブロックは従来どおり
+
+    expect(response.text).toBe('しまむらの取引先は undeux です。');
+  });
+
+  it('マスタ情報の取得に失敗しても QA はナレッジのみで回答する(非ブロッキング)', async () => {
+    mocks.generateJson.mockResolvedValueOnce({
+      value: { answer: 'ナレッジに基づく回答です。', confidence: 'high' },
+      result: llmResult,
+    });
+    // customer-context の顧客情報クエリのみ失敗させる(スコープ導出の再帰 CTE は正常のまま)
+    const { pool } = createMockPool((text, params) => {
+      if (text.includes('FROM ops.customers c')) return new Error('db down');
+      return shimamuraResponder(text, params);
+    });
+
+    const response = await handleMessage(pool, messageEvent('しまむらの取引先は?'), member);
+
+    const genCall = mocks.generateJson.mock.calls[0]?.[0] as { system: string };
+    expect(genCall.system).not.toContain('## 顧客マスタ情報');
+    expect(response.text).toBe('ナレッジに基づく回答です。');
+  });
+
+  it('対象顧客を特定できない質問ではマスタ情報を取得しない', async () => {
+    mocks.generateJson.mockResolvedValueOnce({
+      value: { answer: '一般的な回答です。', confidence: 'high' },
+      result: llmResult,
+    });
+    const { pool, calls } = createMockPool((text) => {
+      if (text.includes('INSERT INTO ops.dialogues')) {
+        return { rows: [{ dialogue_id: '32', created_at: new Date() }] };
+      }
+      return { rows: [] };
+    });
+
+    await handleMessage(pool, messageEvent('納期の一般的な考え方は?'), member);
+
+    expect(findCall(calls, 'FROM ops.customer_relations')).toBeUndefined();
+    const genCall = mocks.generateJson.mock.calls[0]?.[0] as { system: string };
+    expect(genCall.system).not.toContain('## 顧客マスタ情報');
+  });
+});
+
 describe('進行中対話の優先(M3: タスク指示検知による横取り防止)', () => {
   const openMorning = (userId: string): Record<string, unknown> => ({
     dialogue_id: '21',
