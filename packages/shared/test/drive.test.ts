@@ -293,8 +293,32 @@ describe('listFilesRecursive(v0.11: ショートカット解決)', () => {
 
     const listing = await listFilesRecursive('root-1');
 
-    expect(listing.unresolvedShortcuts).toEqual([{ name: 'shimamura', path: 'shimamura' }]);
+    // path は親フォルダのパス(ルート直下は '')— 表示側が path/name で結合する契約
+    expect(listing.unresolvedShortcuts).toEqual([{ name: 'shimamura', path: '' }]);
     expect(listing.files.map((f) => f.id)).toEqual(['f-1']);
+  });
+
+  it('ネストしたフォルダ配下の未解決ショートカットは親パス+名前で報告する(表示の二重化防止)', async () => {
+    responses.push(
+      // ルート直下: 実体フォルダ customer
+      jsonResponse(200, {
+        files: [{ id: 'dir-customer', name: 'customer', mimeType: 'application/vnd.google-apps.folder' }],
+      }),
+      // customer 直下: フォルダショートカット shimamura
+      jsonResponse(200, {
+        files: [
+          {
+            id: 'sc-y',
+            name: 'shimamura',
+            mimeType: 'application/vnd.google-apps.shortcut',
+            shortcutDetails: { targetId: 'dir-y', targetMimeType: 'application/vnd.google-apps.folder' },
+          },
+        ],
+      }),
+      jsonResponse(403, { error: { message: 'not shared' } }),
+    );
+    const listing = await listFilesRecursive('root-1');
+    expect(listing.unresolvedShortcuts).toEqual([{ name: 'shimamura', path: 'customer' }]);
   });
 
   it('実体フォルダの列挙失敗は従来どおり例外(設定不備の顕在化)', async () => {

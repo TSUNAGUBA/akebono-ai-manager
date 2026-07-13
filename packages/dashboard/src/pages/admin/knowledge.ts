@@ -67,7 +67,8 @@ export function normalizeKnowledgeFileName(input: string): string {
   if (FILE_NAME_FORBIDDEN_CHARS.test(withExt)) {
     throw invalidInput('ファイル名に使用できない文字(制御文字・スラッシュ)が含まれています');
   }
-  if (KNOWLEDGE_FILE_EXT_PATTERN.test(withExt) && withExt.replace(KNOWLEDGE_FILE_EXT_PATTERN, '') === '') {
+  // 拡張子を除いた本体が空またはドットのみ('.md'・'..md' 等)の無意味な名前は拒否する
+  if (/^\.*$/.test(withExt.replace(KNOWLEDGE_FILE_EXT_PATTERN, ''))) {
     throw invalidInput('ファイル名を入力してください(拡張子のみの名前は使えません)');
   }
   return withExt;
@@ -286,7 +287,7 @@ export async function renderAdminKnowledge(pool: pg.Pool, ctx: AdminPageContext)
           `<div class="alert error">ショートカット先にアクセスできないため、次の項目は同期されません: ${listing.unresolvedShortcuts
             .slice(0, 10)
             .map((s) => h(s.path === '' ? s.name : `${s.path}/${s.name}`))
-            .join('、')} — ショートカットは Drive の共有権限を引き継ぎません。実体フォルダをナレッジフォルダ内へ移動するか、ショートカット先をランタイム SA に共有してください(deployment-setup.md Step 7-3)</div>`,
+            .join('、')} — ショートカットは Drive の共有権限を引き継ぎません。実体フォルダをナレッジフォルダ内へ移動するか、ショートカット先をランタイム SA に共有してください(deployment-setup.md Step 7-3)。この警告が解消されるまで、Drive から削除した文書の検索除外(チャンク掃除)も保留されます</div>`,
         )
       : raw('');
 
@@ -507,7 +508,7 @@ export async function handleAdminKnowledgePost(
 
   if (action === 'upload_files') {
     if (files.length === 0) {
-      throw invalidInput('ファイルを選択してください(.md / .txt、複数選択可)');
+      throw invalidInput('ファイルを選択してください(.md / .txt / .pdf、複数選択可)');
     }
     if (files.length > MAX_UPLOAD_FILES) {
       throw invalidInput(

@@ -114,7 +114,14 @@ describe('fetchFileText: PDF のテキスト抽出(v0.11)', () => {
     await expect(fetchFileText(pdfFile)).resolves.toBeUndefined();
   });
 
-  it('サイズ上限(20MB)を超える PDF は抽出せず undefined でスキップする', async () => {
+  it('列挙メタデータの size が上限(20MB)超ならダウンロードせずにスキップする(OOM 防止)', async () => {
+    await expect(
+      fetchFileText({ ...pdfFile, size: 20 * 1024 * 1024 + 1 }),
+    ).resolves.toBeUndefined();
+    expect(mocks.driveFetch).not.toHaveBeenCalled();
+  });
+
+  it('size が取得できない場合はダウンロード後の判定でスキップする(二段構え)', async () => {
     mocks.driveFetch.mockResolvedValue(pdfResponse(Buffer.alloc(20 * 1024 * 1024 + 1, 0x20)));
     await expect(fetchFileText(pdfFile)).resolves.toBeUndefined();
   });

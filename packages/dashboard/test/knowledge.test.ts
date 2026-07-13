@@ -148,8 +148,8 @@ describe('ファイル名の検証(normalizeKnowledgeFileName)', () => {
     expect(normalizeKnowledgeFileName('Readme.MD')).toBe('readme.md');
   });
 
-  it('規約外(スラッシュ・制御文字・空・拡張子のみ)は AIM-6004(400)', () => {
-    for (const bad of ['a/b.md', 'a\\b.md', 'bad\u0000name.md', '', '.md', '.pdf']) {
+  it('規約外(スラッシュ・制御文字・空・拡張子のみ・ドットのみ)は AIM-6004(400)', () => {
+    for (const bad of ['a/b.md', 'a\\b.md', 'bad\u0000name.md', '', '.md', '.pdf', '.', '..', '..md']) {
       expect(() => normalizeKnowledgeFileName(bad)).toThrowError(
         expect.objectContaining({ code: ERROR_CODES.ADMIN_INPUT_INVALID, status: 400 }),
       );
