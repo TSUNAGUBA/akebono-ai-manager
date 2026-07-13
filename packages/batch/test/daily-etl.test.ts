@@ -16,23 +16,12 @@ describe('runDailyEtl(集計の手動実行 — v0.12 §6)', () => {
     expect(etl?.params).toEqual([jstDateString()]);
   });
 
-  it('targetDate 指定時はその日付で実行する(許容範囲内の過去日の再集計)', async () => {
-    const targetDate = jstDateStringDaysAgo(3);
+  it('targetDate に当日 JST を明示指定した場合は実行する', async () => {
+    const targetDate = jstDateString();
     const { pool, calls } = createMockPool();
     const summary = await runDailyEtl(pool, { targetDate });
 
     expect(summary).toEqual({ sent: 1, skipped: 0, failed: 0 });
-    expect(findCall(calls, 'dwh.run_daily_etl')?.params).toEqual([targetDate]);
-  });
-
-  it('遡り上限(7日前)ちょうどは許可する(境界値)', async () => {
-    const targetDate = jstDateStringDaysAgo(7);
-    const { pool, calls } = createMockPool();
-    await expect(runDailyEtl(pool, { targetDate })).resolves.toEqual({
-      sent: 1,
-      skipped: 0,
-      failed: 0,
-    });
     expect(findCall(calls, 'dwh.run_daily_etl')?.params).toEqual([targetDate]);
   });
 
@@ -47,10 +36,12 @@ describe('runDailyEtl(集計の手動実行 — v0.12 §6)', () => {
     }
   });
 
-  it('範囲外の対象日(8日前・未来日)は AIM-5005(400)で拒否する(確定済み履歴の上書き防止 — 原則2)', async () => {
-    // fact_workload は日次スナップショットで遡及再計算できないため、定時 ETL の
-    // ルックバック範囲(7日)を超える過去日の洗い替えは履歴を「今日の状態」で壊す
-    for (const bad of [jstDateStringDaysAgo(8), jstDateStringDaysAgo(-1)]) {
+  it('当日以外の対象日(前日・過去日・未来日)は AIM-5005(400)で拒否する(履歴スナップショットの上書き防止 — 原則2)', async () => {
+    // fact_workload は「実行時点の状態」を対象日ラベルで書く日次スナップショットで
+    // 遡及再計算できないため、過去日を対象にすると確定済みの履歴が今日の状態で上書きされる。
+    // API からは当日のみ許可し、SQL 側の保護(前日より古い対象日は既存行を上書きしない)と
+    // 合わせて多層防御とする
+    for (const bad of [jstDateStringDaysAgo(1), jstDateStringDaysAgo(8), jstDateStringDaysAgo(-1)]) {
       const { pool, calls } = createMockPool();
       await expect(runDailyEtl(pool, { targetDate: bad })).rejects.toMatchObject({
         code: 'AIM-5005',
@@ -65,7 +56,7 @@ describe('runDailyEtl(集計の手動実行 — v0.12 §6)', () => {
       if (text.includes('dwh.run_daily_etl')) return new Error('etl down');
       return undefined;
     });
-    await expect(runDailyEtl(pool, { targetDate: jstDateStringDaysAgo(1) })).rejects.toMatchObject({
+    await expect(runDailyEtl(pool, { targetDate: jstDateString() })).rejects.toMatchObject({
       code: 'AIM-5006',
     });
   });

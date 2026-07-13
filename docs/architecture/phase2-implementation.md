@@ -182,8 +182,12 @@
 
 - **決定**: `dwh.run_daily_etl` を SECURITY DEFINER(search_path 固定)化し、PUBLIC から
   EXECUTE を剥奪した上で ai_manager_app_rw にのみ付与する。batch の新ジョブ `daily-etl` が
-  `SELECT dwh.run_daily_etl($1)` を実行し、/admin/jobs から起動できる。手動実行の既定対象日は
-  当日(定時実行の既定は前日のまま)
+  `SELECT dwh.run_daily_etl($1)` を実行し、/admin/jobs から起動できる。手動実行の対象日は
+  **当日のみ**許可する(定時実行の既定は前日のまま): fact_workload は実行時点の状態を
+  対象日ラベルで書く日次スナップショットで遡及再計算できず、過去日の再実行は確定済み履歴を
+  上書きするため(原則2)。ETL 関数側にも「前日より古い対象日は既存スナップショットを
+  上書きしない(欠落補完のみ — ON CONFLICT DO UPDATE の WHERE ガード)」を入れ、
+  直接 SQL 実行に対する多層防御とする(派生ファクトの過去日再集計は従来どおり洗い替え)
 - **理由**: app_rw へ dwh 表の直接書込+ops/dwh スキーマの CREATE(パーティション作成)を
   付与するより、確定した ETL 一式の実行だけを許可する方が最小権限に適う。関数本文は全参照が
   スキーマ修飾済みで、search_path 乗っ取りの余地がない

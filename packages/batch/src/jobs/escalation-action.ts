@@ -89,6 +89,11 @@ export async function runEscalationAction(
  * 「resolved だが未送達」の状態が残る(補償が走れない数百ミリ秒の窓)。この場合
  * エスカレーションは open に戻らないため、オペレーターは再操作ではなく本人への
  * 送達状況の確認が必要になる(対話ログに escalation 対話が無いことで判別できる)。
+ *
+ * 既知の制約(裁定受付ゲートの副作用): recordResolution はクレーム成功時に同一管理者の
+ * 他の open な裁定受付ゲート(Chat の「裁定を記録」押下状態)もクリアする。送信失敗の
+ * 補償ではこのゲートは復元しない(復元は誤キャプチャ方向のリスクがあり、ゲートは
+ * ボタンの再押下で安全に回復できるため — 安全側に倒す)。
  */
 async function answerEscalation(
   pool: pg.Pool,
@@ -135,23 +140,29 @@ async function answerEscalation(
 
   // 管理者経由の回答であることの明示(v0.12 §3)はコード側で必ず付与する(adhoc-checkin と同じ設計)
   const fullText = `${ESCALATION_ANSWER_PREFIX}\n${text}`;
-  const inserted = await query<{ dialogue_id: string }>(
-    pool,
-    `INSERT INTO ops.dialogues (user_id, dialogue_type, turns)
-     VALUES ($1, 'escalation', $2::jsonb)
-     RETURNING dialogue_id`,
-    [
-      escalation.related_user_id,
-      JSON.stringify([{ role: 'ai', content: fullText, ts: new Date().toISOString() }]),
-    ],
-  );
-  const dialogueId = inserted.rows[0]?.dialogue_id;
+  // クレーム後の失敗(対話レコード INSERT・DM 送信のどちらでも)は必ず補償を通す:
+  // INSERT の一時的な DB エラーで例外がそのまま伝播すると、補償が走らず
+  // 「resolved だが未送達」がプロセス生存中に確定してしまう(監査指摘 — 原則4)
+  let dialogueId: string | undefined;
   try {
+    const inserted = await query<{ dialogue_id: string }>(
+      pool,
+      `INSERT INTO ops.dialogues (user_id, dialogue_type, turns)
+       VALUES ($1, 'escalation', $2::jsonb)
+       RETURNING dialogue_id`,
+      [
+        escalation.related_user_id,
+        JSON.stringify([{ role: 'ai', content: fullText, ts: new Date().toISOString() }]),
+      ],
+    );
+    dialogueId = inserted.rows[0]?.dialogue_id;
     await sendChatMessage(chatSpaceId, { text: fullText });
   } catch (sendErr) {
     // 補償: 届いていない回答の対話レコードを削除し、クレームしたエスカレーションを open へ戻す
     // (resolved のままだと「回答済みに見えるが本人に届いていない」不整合が残る)。
     // status='resolved' 条件付きで、他プロセスの解決を誤って巻き戻さない
+    // (resolved → open の遷移はこの補償のみ。クレーム成立中は他プロセスが open 条件の
+    //  recordResolution でクレームできないため、誤爆のインターリーブは構造的に発生しない)
     if (dialogueId !== undefined) {
       await query(pool, 'DELETE FROM ops.dialogues WHERE dialogue_id = $1', [dialogueId]).catch(
         (cleanupErr: unknown) => {
@@ -170,7 +181,7 @@ async function answerEscalation(
         escalationId: escalation.escalation_id,
       });
     });
-    logger.error('エスカレーション回答の DM 送信に失敗しました(open へ戻したため再操作できます)', sendErr, {
+    logger.error('エスカレーション回答の記録・DM 送信に失敗しました(open へ戻したため再操作できます)', sendErr, {
       escalationId: escalation.escalation_id,
       userId: escalation.related_user_id,
     });
