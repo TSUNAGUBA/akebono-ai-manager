@@ -42,6 +42,7 @@ const openRows = [
     knowledge_reflected: false,
     related_user_id: 'member1',
     related_user_name: '田中',
+    related_dm_ready: true,
     created: '2026-07-13 09:00',
     resolved: null,
   },
@@ -56,7 +57,22 @@ const openRows = [
     knowledge_reflected: false,
     related_user_id: null,
     related_user_name: null,
+    related_dm_ready: false,
     created: '2026-07-12 18:00',
+    resolved: null,
+  },
+  {
+    escalation_id: '6',
+    reason: 'priority_conflict',
+    context: '対象メンバーの DM が未登録のケース',
+    status: 'open',
+    resolution: null,
+    resolution_type: null,
+    knowledge_reflected: false,
+    related_user_id: 'member2',
+    related_user_name: '佐藤',
+    related_dm_ready: false,
+    created: '2026-07-12 19:00',
     resolved: null,
   },
 ];
@@ -72,6 +88,7 @@ const resolvedRows = [
     knowledge_reflected: false, // 還流未了 → 再試行可能
     related_user_id: 'member1',
     related_user_name: '田中',
+    related_dm_ready: true,
     created: '2026-07-10 09:00',
     resolved: '2026-07-10 12:00',
   },
@@ -85,6 +102,7 @@ const resolvedRows = [
     knowledge_reflected: false,
     related_user_id: 'member1',
     related_user_name: '田中',
+    related_dm_ready: true,
     created: '2026-07-09 09:00',
     resolved: '2026-07-09 10:00',
   },
@@ -107,7 +125,7 @@ function stubPool(
         return Promise.resolve({ rows, rowCount: rows.length });
       }
       // POST の状態検証クエリ
-      const rows = behavior.actionRows ?? [{ related_user_id: 'member1' }];
+      const rows = behavior.actionRows ?? [{ related_user_id: 'member1', related_dm_ready: true }];
       return Promise.resolve({ rows, rowCount: rows.length });
     },
   } as unknown as pg.Pool;
@@ -232,18 +250,24 @@ describe('エスカレーションページの描画', () => {
     expect(out).toContain('<textarea name="text"');
     // 裁定フォームの説明文(v0.12 §3)
     expect(out).toContain('判断基準ナレッジへ還流され、今後の回答に反映されます');
-    // 回答不要は confirm 付き
+    // 全アクションに confirm 付き(誤クリック・二重送信の防止)
+    expect(out).toContain('回答を送信し、このエスカレーションを解決しますか');
+    expect(out).toContain('裁定を記録し、このエスカレーションを解決しますか');
     expect(out).toContain('回答不要として解決しますか');
   });
 
-  it('related_user_id がない行には回答フォームを出さず理由を表示する', async () => {
+  it('related_user_id がない行・DM 未登録の行には回答フォームを出さず理由を表示する', async () => {
     process.env['BATCH_URL'] = 'https://batch.example.run.app';
     const out = (await renderAdminEscalations(stubPool(), adminCtx())).html;
 
     // #2(対象メンバーなし)のカードには回答フォームがなく、理由の案内が出る
     expect(out).toContain('回答の送信はできません');
-    // 回答フォームは対象メンバーのいる #1 の1件のみ
+    // #6(DM 未登録)のカードにも回答フォームがなく、登録手順の案内が出る
+    expect(out).toContain('DM スペースが未登録のため回答を送信できません');
+    expect(out).toContain('本人が Chat アプリに一度話しかけると登録されます');
+    // 回答フォームは対象メンバーがいて DM 登録済みの #1 の1件のみ(裁定・回答不要は全カードに出る)
     expect(out.match(/value="answer"/g)).toHaveLength(1);
+    expect(out.match(/value="ruling"/g)).toHaveLength(3);
   });
 
   it('還流未了の裁定(ruling / NULL)にのみ「ナレッジ還流を再試行」を表示する', async () => {
@@ -276,15 +300,35 @@ describe('エスカレーションページの描画', () => {
     ).html;
     expect(ruled).toContain('裁定を記録しました');
 
-    // JobSummary の failed>0 は AIM-6009 の案内つきエラー表示
+    // 裁定の還流失敗は sent=1, failed=1(batch との契約)。全面成功の文言を出さず
+    // 「ナレッジ還流を再試行」への手動回復パスを案内する
+    const rulingRefluxFailed = (
+      await renderAdminEscalations(stubPool(), adminCtx('?ruled=1&sent=1&skipped=0&failed=1'))
+    ).html;
+    expect(rulingRefluxFailed).toContain('裁定は記録しましたが、ナレッジへの反映に失敗しました');
+    expect(rulingRefluxFailed).toContain('ナレッジ還流を再試行');
+    expect(rulingRefluxFailed).not.toContain('今後の回答に反映されます</div>');
+
+    // 裁定以外の failed>0 は AIM-6009 の案内つきエラー表示
     const failed = (
-      await renderAdminEscalations(stubPool(), adminCtx('?ruled=1&sent=0&skipped=0&failed=1'))
+      await renderAdminEscalations(stubPool(), adminCtx('?answered=1&sent=0&skipped=0&failed=1'))
     ).html;
     expect(failed).toContain('AIM-6009');
+
+    // skipped の文言はアクションで出し分ける(解決系=別経路で解決済み/還流=還流済み)
+    const skippedResolve = (
+      await renderAdminEscalations(stubPool(), adminCtx('?no_action_done=1&sent=0&skipped=1&failed=0'))
+    ).html;
+    expect(skippedResolve).toContain('別の経路で既に解決済みのため、送信・記録は行いませんでした');
+    const skippedReflux = (
+      await renderAdminEscalations(stubPool(), adminCtx('?refluxed=1&sent=0&skipped=1&failed=0'))
+    ).html;
+    expect(skippedReflux).toContain('既にナレッジへ還流済みでした');
 
     const errored = (await renderAdminEscalations(stubPool(), adminCtx('?escalation_error=request')))
       .html;
     expect(errored).toContain('AIM-6009');
+    expect(errored).toContain('起動または実行に失敗しました');
 
     // 継承プロパティ名はメッセージ扱いしない
     const ignored = (await renderAdminEscalations(stubPool(), adminCtx('?escalation_error=toString')))
@@ -320,7 +364,9 @@ describe('エスカレーション操作ハンドラ(POST)', () => {
     );
 
     assertCallsValid(captured);
+    // open 状態に加え、対象メンバーの DM 登録も SoT で検証する
     expect(captured[0]?.text).toContain(`status = 'open'`);
+    expect(captured[0]?.text).toContain('chat_space_id');
     expect(captured[0]?.params).toEqual(['5']);
     expect(mocks.getIdTokenFor).toHaveBeenCalledWith('https://batch.example.run.app');
     expect(fetchCalls).toEqual([
@@ -336,8 +382,8 @@ describe('エスカレーション操作ハンドラ(POST)', () => {
         }),
       },
     ]);
-    // PRG: 操作したカードのアンカーへ戻る
-    expect(location).toBe('/admin/escalations?answered=1&sent=1&skipped=0&failed=0#escalation-5');
+    // PRG: 解決したカードは消えるためアンカーなし(結果は sticky なフラッシュで見える)
+    expect(location).toBe('/admin/escalations?answered=1&sent=1&skipped=0&failed=0');
   });
 
   it('ruling: 裁定テキスト付きで起動し ?ruled=1 へ PRG する', async () => {
@@ -358,7 +404,7 @@ describe('エスカレーション操作ハンドラ(POST)', () => {
         operatorUserId: 'u1',
       }),
     );
-    expect(location).toBe('/admin/escalations?ruled=1&sent=1&skipped=0&failed=0#escalation-1');
+    expect(location).toBe('/admin/escalations?ruled=1&sent=1&skipped=0&failed=0');
   });
 
   it('no_action: text なしのボディで起動する', async () => {
@@ -374,9 +420,7 @@ describe('エスカレーション操作ハンドラ(POST)', () => {
     expect(fetchCalls[0]?.body).toBe(
       JSON.stringify({ escalationId: '2', action: 'no_action', operatorUserId: 'u1' }),
     );
-    expect(location).toBe(
-      '/admin/escalations?no_action_done=1&sent=1&skipped=0&failed=0#escalation-2',
-    );
+    expect(location).toBe('/admin/escalations?no_action_done=1&sent=1&skipped=0&failed=0');
   });
 
   it('reflux: 還流可能(resolved・未還流・裁定)を SoT で検証してから起動する', async () => {
@@ -455,13 +499,30 @@ describe('エスカレーション操作ハンドラ(POST)', () => {
     await expectAppErrorAsync(
       () =>
         handleAdminEscalationsPost(
-          stubPool([], { actionRows: [{ related_user_id: null }] }),
+          stubPool([], { actionRows: [{ related_user_id: null, related_dm_ready: false }] }),
           viewer,
           new URLSearchParams({ action: 'answer', escalation_id: '2', text: '回答' }),
         ),
       ERROR_CODES.ADMIN_INPUT_INVALID,
       400,
       '回答を送信できません',
+    );
+    expect(fetchCalls).toHaveLength(0);
+  });
+
+  it('answer: 対象メンバーが DM 未登録の行への回答送信は AIM-6004(400)で batch を起動しない', async () => {
+    process.env['BATCH_URL'] = 'https://batch.example.run.app';
+    const fetchCalls = stubFetch(okResponse);
+    await expectAppErrorAsync(
+      () =>
+        handleAdminEscalationsPost(
+          stubPool([], { actionRows: [{ related_user_id: 'member2', related_dm_ready: false }] }),
+          viewer,
+          new URLSearchParams({ action: 'answer', escalation_id: '6', text: '回答' }),
+        ),
+      ERROR_CODES.ADMIN_INPUT_INVALID,
+      400,
+      'DM スペースが未登録',
     );
     expect(fetchCalls).toHaveLength(0);
   });
@@ -474,7 +535,7 @@ describe('エスカレーション操作ハンドラ(POST)', () => {
       viewer,
       new URLSearchParams({ action: 'no_action', escalation_id: '1' }),
     );
-    expect(location).toBe('/admin/escalations?escalation_error=request#escalation-1');
+    expect(location).toBe('/admin/escalations?escalation_error=request');
 
     const timeoutError = new Error('timed out');
     timeoutError.name = 'TimeoutError';
@@ -484,6 +545,6 @@ describe('エスカレーション操作ハンドラ(POST)', () => {
       viewer,
       new URLSearchParams({ action: 'no_action', escalation_id: '1' }),
     );
-    expect(timedOut).toBe('/admin/escalations?escalation_error=timeout#escalation-1');
+    expect(timedOut).toBe('/admin/escalations?escalation_error=timeout');
   });
 });

@@ -1,4 +1,10 @@
-import { ERROR_CODES, jstDateString, optionalEnv, query } from '@ai-manager/shared';
+import {
+  ERROR_CODES,
+  FEEDBACK_TEXT_MAX_LENGTH,
+  jstDateString,
+  optionalEnv,
+  query,
+} from '@ai-manager/shared';
 import type pg from 'pg';
 import { badge, responsiveTable, section } from '../../render/components.js';
 import { h, html, raw, type Raw } from '../../render/html.js';
@@ -54,6 +60,8 @@ interface FeedbackRow {
   dialogue_id: string;
   status: string;
   feedback: string;
+  /** rag への還流済みフラグ。delivered かつ未還流は「ナレッジ再還流」で回復できる(原則6)。 */
+  knowledge_reflected: boolean;
   created_jst: string;
   delivered_jst: string | null;
 }
@@ -67,11 +75,13 @@ interface UserOption {
 const FEEDBACK_SUCCESS_MESSAGES: Record<string, string> = {
   feedback: 'フィードバックを記録しました。AI がお詫びと訂正を本人へ送ります',
   feedback_resent: '訂正メッセージを再送しました',
+  feedback_refluxed: 'フィードバックをナレッジへ再還流しました。以後の回答に反映されます',
 };
 
 const FEEDBACK_ERROR_MESSAGES: Record<string, string> = {
+  // batch がジョブ実行後にエラー応答(500)を返すケースも包含するため「起動または実行」と表現する
   request:
-    'フィードバックジョブの起動に失敗しました。batch サービスの状態とログ(AIM-6010)を確認してください',
+    'フィードバック処理の起動または実行に失敗しました。batch サービスの状態とログ(AIM-6010)を確認してください',
   timeout:
     '応答待ちがタイムアウトしました。処理はバックグラウンドで継続している可能性があるため、しばらくしてからこのページを再読み込みして送信状態を確認してください',
 };
@@ -80,11 +90,11 @@ function feedbackFlash(ctx: AdminPageContext): Raw {
   const params = ctx.url.searchParams;
   for (const [param, message] of Object.entries(FEEDBACK_SUCCESS_MESSAGES)) {
     if (params.get(param) !== '1') continue;
-    // JobSummary の failed を反映する(起動は成功しても訂正送信が失敗し得る。
-    // その場合フィードバックは pending で残り「再送」から再試行できる)
+    // JobSummary の failed を反映する(起動は成功しても訂正送信・還流が失敗し得る。
+    // 訂正未送達は「再送」、送達済みで還流未了は「ナレッジ再還流」から再試行できる)
     if (flashCount(params, 'failed') !== '0') {
       return raw(
-        `<div class="alert error">フィードバックの処理に失敗しました。batch のログ(AIM-6010)を確認し、記録済みの場合は「再送」から再試行してください</div>`,
+        `<div class="alert error">フィードバックの処理に失敗しました。batch のログ(AIM-6010)を確認してください(「訂正送信待ち」は「再送」、「未還流」は「ナレッジ再還流」から再試行できます)</div>`,
       );
     }
     return raw(`<div class="alert ok">${h(message)}</div>`);
@@ -160,6 +170,7 @@ export async function renderAdminDialogues(pool: pg.Pool, ctx: AdminPageContext)
     const feedback = await query<FeedbackRow>(
       pool,
       `SELECT feedback_id::text AS feedback_id, dialogue_id::text AS dialogue_id, status, feedback,
+              knowledge_reflected,
               to_char(created_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD HH24:MI') AS created_jst,
               to_char(delivered_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD HH24:MI') AS delivered_jst
        FROM ops.dialogue_feedback
@@ -221,11 +232,31 @@ export async function renderAdminDialogues(pool: pg.Pool, ctx: AdminPageContext)
   );
 
   // ── フィードバックカード(対話ごと。PRG のアンカー #dialogue-{id} でここへ戻る)──
+  // フィルタ引き継ぎ用の hidden(再送・再還流の各フォームで共通)
+  const filterFields = html`<input type="hidden" name="filter_user" value="${requestedUser}">
+    <input type="hidden" name="filter_date" value="${date}">`;
+
   const feedbackStatus = (fb: FeedbackRow): Raw => {
+    // 送達済みで還流未了の行のみ「ナレッジ再還流」で回復できる(手動回復パス — 原則6)
+    const refluxForm =
+      fb.status === 'delivered' && !fb.knowledge_reflected && batchUrl !== ''
+        ? html`<form method="post" action="${PATH}" class="inline-form" style="margin-left:10px"
+              onsubmit="return confirm('このフィードバックのナレッジ還流を再試行しますか?')">
+            ${csrfField(ctx)}
+            <input type="hidden" name="action" value="reflux">
+            <input type="hidden" name="feedback_id" value="${fb.feedback_id}">
+            ${filterFields}
+            <button class="btn secondary" type="submit">ナレッジ再還流</button>
+          </form>`
+        : html``;
     const state =
       fb.status === 'delivered'
-        ? html`${badge('訂正送信済み', 'ok')} 送信日時: ${fb.delivered_jst ?? '—'}`
-        : html`${badge('訂正送信待ち', 'warn')} 記録日時: ${fb.created_jst}${
+        ? html`${badge('訂正送信済み', 'ok')} ${
+            fb.knowledge_reflected ? badge('還流済み', 'ok') : badge('未還流', 'warn')
+          } 送信日時: ${fb.delivered_jst ?? '—'}${refluxForm}`
+        : html`${badge('訂正送信待ち', 'warn')} ${
+            fb.knowledge_reflected ? badge('還流済み', 'ok') : badge('未還流', 'muted')
+          } 記録日時: ${fb.created_jst}${
             batchUrl === ''
               ? html``
               : html`<form method="post" action="${PATH}" class="inline-form" style="margin-left:10px"
@@ -233,8 +264,7 @@ export async function renderAdminDialogues(pool: pg.Pool, ctx: AdminPageContext)
                   ${csrfField(ctx)}
                   <input type="hidden" name="action" value="resend">
                   <input type="hidden" name="feedback_id" value="${fb.feedback_id}">
-                  <input type="hidden" name="filter_user" value="${requestedUser}">
-                  <input type="hidden" name="filter_date" value="${date}">
+                  ${filterFields}
                   <button class="btn secondary" type="submit">再送</button>
                 </form>`
           }`;
@@ -251,15 +281,15 @@ export async function renderAdminDialogues(pool: pg.Pool, ctx: AdminPageContext)
         ? html`<p class="form-help">
             BATCH_URL が未設定のためフィードバックは送信できません(デプロイ時に batch サービスの URL が自動配線されます。デプロイログの警告を確認してください)。
           </p>`
-        : html`<form method="post" action="${PATH}" class="form" style="margin-top:14px">
+        : html`<form method="post" action="${PATH}" class="form" style="margin-top:14px"
+              onsubmit="return confirm('このフィードバックを送信しますか?(AI がお詫びと訂正を本人へ送ります)')">
             ${csrfField(ctx)}
             <input type="hidden" name="action" value="feedback">
             <input type="hidden" name="dialogue_id" value="${d.dialogue_id}">
             <input type="hidden" name="dialogue_created_at" value="${d.created_iso}">
-            <input type="hidden" name="filter_user" value="${requestedUser}">
-            <input type="hidden" name="filter_date" value="${date}">
-            <label class="field">正しい回答・指摘(AI がお詫びと訂正を本人へ送ります)(2000字以内)
-              <textarea name="feedback" required maxlength="2000" rows="5"
+            ${filterFields}
+            <label class="field">正しい回答・指摘(AI がお詫びと訂正を本人へ送ります)(${FEEDBACK_TEXT_MAX_LENGTH}字以内)
+              <textarea name="feedback" required maxlength="${FEEDBACK_TEXT_MAX_LENGTH}" rows="5"
                         placeholder="AI の回答のどこが誤りで、正しくはどうかを具体的に"></textarea>
             </label>
             <button class="btn" type="submit">フィードバックを送信</button>
@@ -278,7 +308,7 @@ export async function renderAdminDialogues(pool: pg.Pool, ctx: AdminPageContext)
       : section(
           'フィードバック(お詫びと訂正の送信)',
           html`${dialogues.rows.map((d) => feedbackCard(d))}`,
-          'フィードバックの記録・訂正メッセージの送信・ナレッジへの還流は batch が行います。訂正の送信に失敗した場合は「再送」から再試行できます(送信済みの訂正は再送されません — 冪等)',
+          'フィードバックの記録・訂正メッセージの送信・ナレッジへの還流は batch が行います。訂正の送信に失敗した場合は「再送」、還流のみ失敗した場合は「ナレッジ再還流」から再試行できます(送信済みの訂正は再送されません — 冪等)',
         );
 
   return html`
@@ -314,7 +344,7 @@ export async function handleAdminDialoguesPost(
   form: URLSearchParams,
 ): Promise<string> {
   const action = form.get('action');
-  if (action !== 'feedback' && action !== 'resend') {
+  if (action !== 'feedback' && action !== 'resend' && action !== 'reflux') {
     throw invalidInput('不明な操作です');
   }
   const batchUrl = optionalEnv('BATCH_URL', '');
@@ -333,7 +363,8 @@ export async function handleAdminDialoguesPost(
     if (Number.isNaN(new Date(dialogueCreatedAt).getTime())) {
       throw invalidInput('対話日時の形式が不正です。ページを再読み込みしてやり直してください');
     }
-    const feedback = requireText(form, 'feedback', 'フィードバック', 2000);
+    // 上限は batch との契約定数 FEEDBACK_TEXT_MAX_LENGTH(片側変更によるドリフト防止)
+    const feedback = requireText(form, 'feedback', 'フィードバック', FEEDBACK_TEXT_MAX_LENGTH);
     // batch の /jobs/dialogue-feedback を起動する(共通ヘルパー。監査ログもヘルパー側で記録)
     return triggerBatchJob({
       batchUrl,
@@ -352,35 +383,69 @@ export async function handleAdminDialoguesPost(
     });
   }
 
-  // action === 'resend': 記録済みフィードバック(pending)の訂正メッセージ再送
   const feedbackId = requireNumericId(form, 'feedback_id', 'フィードバック');
-  // 再送対象を SoT(ops.dialogue_feedback)で検証する(delivered の二重送信を防ぐ — 原則2。
-  // batch 側でも防御する二段構え)。dialogue_id は PRG のアンカーに使う
+
+  if (action === 'resend') {
+    // 記録済みフィードバック(pending)の訂正メッセージ再送。
+    // 再送対象を SoT(ops.dialogue_feedback)で検証する(delivered の二重送信を防ぐ — 原則2。
+    // batch 側でも防御する二段構え)。dialogue_id は PRG のアンカーに使う
+    const found = await query<{ dialogue_id: string }>(
+      pool,
+      `SELECT dialogue_id::text AS dialogue_id
+       FROM ops.dialogue_feedback
+       WHERE feedback_id = $1 AND status = 'pending'`,
+      [feedbackId],
+    );
+    const row = found.rows[0];
+    if (row === undefined) {
+      throw invalidInput(
+        '再送できるフィードバックが見つかりません(既に送信済みの可能性があります)。ページを再読み込みしてやり直してください',
+      );
+    }
+    return triggerBatchJob({
+      batchUrl,
+      jobName: 'dialogue-feedback',
+      jobLabel: '対話フィードバック(再送)',
+      viewer,
+      waitMs: FEEDBACK_WAIT_MS,
+      errorCode: ERROR_CODES.FEEDBACK_TRIGGER_FAILED,
+      body: { feedbackId, operatorUserId: viewer.userId },
+      auditAction: 'dialogue.feedback_resend',
+      auditDetails: { feedbackId },
+      redirectBase,
+      successParam: 'feedback_resent',
+      errorParam: 'feedback_error',
+      redirectAnchor: `dialogue-${row.dialogue_id}`,
+    });
+  }
+
+  // action === 'reflux': 送達済み(delivered)で還流未了のフィードバックの再還流(訂正は再送しない)。
   const found = await query<{ dialogue_id: string }>(
     pool,
     `SELECT dialogue_id::text AS dialogue_id
      FROM ops.dialogue_feedback
-     WHERE feedback_id = $1 AND status = 'pending'`,
+     WHERE feedback_id = $1 AND status = 'delivered' AND NOT knowledge_reflected`,
     [feedbackId],
   );
   const row = found.rows[0];
   if (row === undefined) {
     throw invalidInput(
-      '再送できるフィードバックが見つかりません(既に送信済みの可能性があります)。ページを再読み込みしてやり直してください',
+      '再還流できるフィードバックが見つかりません(還流済みか、訂正が未送達です)。ページを再読み込みしてやり直してください',
     );
   }
   return triggerBatchJob({
     batchUrl,
     jobName: 'dialogue-feedback',
-    jobLabel: '対話フィードバック(再送)',
+    jobLabel: '対話フィードバック(ナレッジ再還流)',
     viewer,
     waitMs: FEEDBACK_WAIT_MS,
     errorCode: ERROR_CODES.FEEDBACK_TRIGGER_FAILED,
-    body: { feedbackId },
-    auditAction: 'dialogue.feedback_resend',
+    // refluxOnly は batch との契約(還流のみ再試行し、訂正メッセージは再送しない)
+    body: { feedbackId, refluxOnly: 'true', operatorUserId: viewer.userId },
+    auditAction: 'dialogue.feedback_reflux',
     auditDetails: { feedbackId },
     redirectBase,
-    successParam: 'feedback_resent',
+    successParam: 'feedback_refluxed',
     errorParam: 'feedback_error',
     redirectAnchor: `dialogue-${row.dialogue_id}`,
   });

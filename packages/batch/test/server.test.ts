@@ -129,9 +129,16 @@ describe('POST /jobs/{name} のボディ受け渡し', () => {
     expect(res.status).toBe(200);
     expect(mocks.runDialogueFeedback).toHaveBeenCalledWith(stubPool, create);
 
-    res = await post('/jobs/dialogue-feedback', JSON.stringify({ feedbackId: '10' }));
+    const resend = { feedbackId: '10', operatorUserId: 'admin1' };
+    res = await post('/jobs/dialogue-feedback', JSON.stringify(resend));
     expect(res.status).toBe(200);
-    expect(mocks.runDialogueFeedback).toHaveBeenLastCalledWith(stubPool, { feedbackId: '10' });
+    expect(mocks.runDialogueFeedback).toHaveBeenLastCalledWith(stubPool, resend);
+
+    // 還流のみ再試行(refluxOnly)の形態も通す
+    const refluxOnly = { feedbackId: '10', refluxOnly: 'true', operatorUserId: 'admin1' };
+    res = await post('/jobs/dialogue-feedback', JSON.stringify(refluxOnly));
+    expect(res.status).toBe(200);
+    expect(mocks.runDialogueFeedback).toHaveBeenLastCalledWith(stubPool, refluxOnly);
   });
 
   it('ジョブが投げた AIM-5005(400)はコード・ステータスを保って返す(JOB_FAILED で潰さない)', async () => {
@@ -183,6 +190,7 @@ describe('parseJobParams', () => {
         dialogueCreatedAt: '2026-07-10T00:00:00.000Z',
         feedback: '正しい内容',
         feedbackId: '10',
+        refluxOnly: 'true',
       }),
     ).toEqual({
       targetDate: '2026-07-01',
@@ -194,6 +202,7 @@ describe('parseJobParams', () => {
       dialogueCreatedAt: '2026-07-10T00:00:00.000Z',
       feedback: '正しい内容',
       feedbackId: '10',
+      refluxOnly: 'true',
     });
   });
 

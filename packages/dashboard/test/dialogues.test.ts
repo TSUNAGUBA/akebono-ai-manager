@@ -67,6 +67,7 @@ const feedbackRows = [
     dialogue_id: '5',
     status: 'pending',
     feedback: '正しくは B 案です',
+    knowledge_reflected: false,
     created_jst: '2026-07-13 10:00',
     delivered_jst: null,
   },
@@ -75,8 +76,18 @@ const feedbackRows = [
     dialogue_id: '6',
     status: 'delivered',
     feedback: '訂正済みの指摘',
+    knowledge_reflected: false, // 送達済み・還流未了 → 「ナレッジ再還流」の対象
     created_jst: '2026-07-13 11:00',
     delivered_jst: '2026-07-13 11:05',
+  },
+  {
+    feedback_id: '13',
+    dialogue_id: '5',
+    status: 'delivered',
+    feedback: '還流まで完了した指摘',
+    knowledge_reflected: true, // 還流済み → 再還流ボタンは出さない
+    created_jst: '2026-07-13 09:30',
+    delivered_jst: '2026-07-13 09:35',
   },
 ];
 
@@ -222,6 +233,8 @@ describe('対話ログページの描画', () => {
     expect(out).toContain('name="dialogue_created_at" value="2026-07-13T00:00:00.000000Z"');
     expect(out).toContain('<textarea name="feedback"');
     expect(out).toContain('正しい回答・指摘(AI がお詫びと訂正を本人へ送ります)');
+    // 誤クリック・二重送信の防止(confirm+PRG)
+    expect(out).toContain('このフィードバックを送信しますか');
   });
 
   it('既存フィードバックの状態を表示する(pending=再送ボタン付き / delivered=送信日時)', async () => {
@@ -235,6 +248,18 @@ describe('対話ログページの描画', () => {
     expect(out).toContain('2026-07-13 11:05');
     // 再送ボタンは pending の1件のみ(delivered には出さない)
     expect(out.match(/value="resend"/g)).toHaveLength(1);
+  });
+
+  it('還流状態(還流済み/未還流)を表示し、送達済み・還流未了にのみ「ナレッジ再還流」を出す', async () => {
+    process.env['BATCH_URL'] = 'https://batch.example.run.app';
+    const out = (await renderAdminDialogues(stubPool(), adminCtx())).html;
+
+    expect(out).toContain('>還流済み<');
+    expect(out).toContain('>未還流<');
+    expect(out).toContain('>ナレッジ再還流</button>');
+    // 対象は #12(delivered・未還流)のみ。#11(pending)・#13(還流済み)には出さない
+    expect(out.match(/value="reflux"/g)).toHaveLength(1);
+    expect(out).toContain('ナレッジ還流を再試行しますか');
   });
 
   it('フィルタ(ユーザー・日付)をクエリに反映し、不正な日付は当日 JST へ落とす', async () => {
@@ -269,6 +294,11 @@ describe('対話ログページの描画', () => {
       await renderAdminDialogues(stubPool(), adminCtx('?feedback_resent=1&sent=1&skipped=0&failed=0'))
     ).html;
     expect(resent).toContain('再送しました');
+
+    const refluxed = (
+      await renderAdminDialogues(stubPool(), adminCtx('?feedback_refluxed=1&sent=1&skipped=0&failed=0'))
+    ).html;
+    expect(refluxed).toContain('ナレッジへ再還流しました');
 
     // JobSummary の failed>0 は AIM-6010 の案内つきエラー表示
     const failed = (
@@ -371,7 +401,7 @@ describe('対話フィードバックハンドラ(POST)', () => {
     expect(fetchCalls).toHaveLength(0);
   });
 
-  it('resend: pending を SoT で検証し、feedbackId のみのボディで再起動する', async () => {
+  it('resend: pending を SoT で検証し、feedbackId + operatorUserId のボディで再起動する', async () => {
     process.env['BATCH_URL'] = 'https://batch.example.run.app';
     const fetchCalls = stubFetch(okResponse);
     const captured: CapturedCall[] = [];
@@ -385,10 +415,51 @@ describe('対話フィードバックハンドラ(POST)', () => {
     assertCallsValid(captured);
     expect(captured[0]?.text).toContain(`status = 'pending'`);
     expect(captured[0]?.params).toEqual(['11']);
-    expect(fetchCalls[0]?.body).toBe(JSON.stringify({ feedbackId: '11' }));
+    expect(fetchCalls[0]?.body).toBe(JSON.stringify({ feedbackId: '11', operatorUserId: 'u1' }));
     expect(location).toBe(
       '/admin/dialogues?date=2026-07-13&feedback_resent=1&sent=1&skipped=0&failed=0#dialogue-5',
     );
+  });
+
+  it('reflux: delivered・還流未了を SoT で検証し、refluxOnly 付きボディで再還流を起動する', async () => {
+    process.env['BATCH_URL'] = 'https://batch.example.run.app';
+    const fetchCalls = stubFetch(okResponse);
+    const captured: CapturedCall[] = [];
+
+    const location = await handleAdminDialoguesPost(
+      stubPool(captured),
+      viewer,
+      new URLSearchParams({ action: 'reflux', feedback_id: '12', filter_date: '2026-07-13' }),
+    );
+
+    assertCallsValid(captured);
+    expect(captured[0]?.text).toContain(`status = 'delivered'`);
+    expect(captured[0]?.text).toContain('NOT knowledge_reflected');
+    expect(captured[0]?.params).toEqual(['12']);
+    // 還流のみ再試行(訂正メッセージは再送しない)— batch との契約
+    expect(fetchCalls[0]?.body).toBe(
+      JSON.stringify({ feedbackId: '12', refluxOnly: 'true', operatorUserId: 'u1' }),
+    );
+    expect(location).toBe(
+      '/admin/dialogues?date=2026-07-13&feedback_refluxed=1&sent=1&skipped=0&failed=0#dialogue-5',
+    );
+  });
+
+  it('reflux: 対象外(還流済み・未送達)は AIM-6004(400)で batch を起動しない', async () => {
+    process.env['BATCH_URL'] = 'https://batch.example.run.app';
+    const fetchCalls = stubFetch(okResponse);
+    await expectAppErrorAsync(
+      () =>
+        handleAdminDialoguesPost(
+          stubPool([], { resendRows: [] }),
+          viewer,
+          new URLSearchParams({ action: 'reflux', feedback_id: '13' }),
+        ),
+      ERROR_CODES.ADMIN_INPUT_INVALID,
+      400,
+      '再還流できるフィードバックが見つかりません',
+    );
+    expect(fetchCalls).toHaveLength(0);
   });
 
   it('resend: 送信済み(pending でない)は AIM-6004(400)で batch を起動しない(二重送信防止)', async () => {

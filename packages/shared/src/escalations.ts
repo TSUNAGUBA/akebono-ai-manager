@@ -17,6 +17,25 @@ import { embedTexts } from './vertex.js';
 /** 解決の種別(v0.12 §3)。NULL(旧データ)は 'ruling' 相当。 */
 export type EscalationResolutionType = 'ruling' | 'admin_message' | 'no_action';
 
+/**
+ * 裁定・回答本文の文字数上限(v0.12 §3)。
+ * chat-gateway(裁定ゲート)・batch(escalation-action)・dashboard(フォーム)の
+ * 3パッケージ間のパラメータ契約のため、ここで一元管理する(片側だけの変更による
+ * 「フォームは通るがジョブは 400」のドリフトを防ぐ)。
+ */
+export const RESOLUTION_TEXT_MAX_LENGTH = 1000;
+
+/**
+ * 還流の対象は裁定のみか(v0.12 §3 / ADR-18)。
+ * admin_message(回答文)・no_action(解決メモ)を decision_rules ナレッジ化しない。
+ * NULL は v0.12 以前の未分類(=裁定)として許可する。
+ * Chat の再還流ボタン(card-action)・batch の reflux アクション・dashboard の
+ * 再還流表示が共有する判定(消費者ごとの条件ドリフトを防ぐ)。
+ */
+export function isRefluxableResolutionType(resolutionType: string | null): boolean {
+  return resolutionType === null || resolutionType === 'ruling';
+}
+
 export interface EscalationRow {
   escalation_id: string; // BIGINT は pg で文字列になる
   reason: string;

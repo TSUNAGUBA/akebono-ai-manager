@@ -109,7 +109,7 @@ describe('runEscalationAction: 共通検証', () => {
 });
 
 describe('runEscalationAction: answer(メンバーへ回答を送信して解決)', () => {
-  it('SoT ファースト: 対話レコード作成 → DM 送信 → 送信成功後に admin_message で解決する', async () => {
+  it('クレームファースト: 解決のクレーム(admin_message)→ 対話レコード作成 → DM 送信の順で処理する', async () => {
     const { pool, calls } = createMockPool(makeResponder());
     const summary = await runEscalationAction(pool, answerParams);
 
@@ -123,24 +123,33 @@ describe('runEscalationAction: answer(メンバーへ回答を送信して解決
     expect(space).toBe('spaces/member1');
     expect(message.text.startsWith(ESCALATION_ANSWER_PREFIX)).toBe(true);
     expect(message.text).toContain(answerParams.text);
-    // 解決の記録(recordResolution)は対話レコード作成・送信より後(送達を確認してから解決)
+    // 解決のクレーム(open→resolved の条件付き UPDATE)は DM 送信・対話レコード作成より先
+    // (送信後に記録する順序だと、並行実行で二重 DM が起きる)
     const resolve = findCall(calls, 'SET resolution = $3');
-    expect(callIndex(calls, 'INSERT INTO ops.dialogues')).toBeLessThan(
-      callIndex(calls, 'SET resolution = $3'),
+    expect(callIndex(calls, 'SET resolution = $3')).toBeLessThan(
+      callIndex(calls, 'INSERT INTO ops.dialogues'),
     );
     expect(resolve?.params[2]).toBe(answerParams.text);
     expect(resolve?.params[3]).toBe('admin_message');
     expect(resolve?.params[1]).toBe('admin1'); // resolved_by は操作者
   });
 
-  it('DM 送信失敗は対話レコードを補償削除し、解決を記録せず failed を返す(open のまま=再操作可能)', async () => {
+  it('DM 送信失敗は対話レコードを補償削除し、エスカレーションを open へ巻き戻して failed を返す(再操作可能)', async () => {
     mocks.sendChatMessage.mockRejectedValue(new Error('chat down'));
     const { pool, calls } = createMockPool(makeResponder());
     const summary = await runEscalationAction(pool, answerParams);
 
     expect(summary).toEqual({ sent: 0, skipped: 0, failed: 1 });
     expect(findCall(calls, 'DELETE FROM ops.dialogues')?.params).toEqual(['55']);
-    expect(findCall(calls, 'SET resolution = $3')).toBeUndefined();
+    // クレーム済みの解決を巻き戻す(resolved のまま残すと「回答済みに見えるが未送達」の不整合)
+    const rollback = findCall(calls, `SET status = 'open'`);
+    expect(rollback?.text).toContain('resolution = NULL');
+    expect(rollback?.text).toContain('resolution_type = NULL');
+    expect(rollback?.text).toContain('resolved_by = NULL');
+    expect(rollback?.text).toContain('resolved_at = NULL');
+    // 他プロセスの解決を誤って巻き戻さないよう resolved 条件付き
+    expect(rollback?.text).toContain(`AND status = 'resolved'`);
+    expect(rollback?.params).toEqual(['9']);
   });
 
   it('text 欠落・1000字超過は AIM-5005', async () => {
@@ -186,14 +195,18 @@ describe('runEscalationAction: answer(メンバーへ回答を送信して解決
     expect(findCall(calls, 'INSERT INTO ops.dialogues')).toBeUndefined();
   });
 
-  it('送信後に別経路で解決済みだった競合は警告してスキップ扱い(解決済みを上書きしない)', async () => {
-    const { pool } = createMockPool((text, params) => {
-      // getEscalation 時点では open、recordResolution 時点では競合(0行)
+  it('クレームの敗者(並行実行との競合)は DM を送らずスキップする(二重 DM の防止)', async () => {
+    const { pool, calls } = createMockPool((text, params) => {
+      // getEscalation 時点では open、クレーム(recordResolution)時点では競合(0行)
       if (text.includes('SET resolution = $3')) return { rows: [] };
       return makeResponder()(text, params);
     });
     const summary = await runEscalationAction(pool, answerParams);
+
     expect(summary).toEqual({ sent: 0, skipped: 1, failed: 0 });
+    // クレームに敗れた側は DM 送信・対話レコード作成のどちらにも進まない
+    expect(mocks.sendChatMessage).not.toHaveBeenCalled();
+    expect(findCall(calls, 'INSERT INTO ops.dialogues')).toBeUndefined();
   });
 });
 
@@ -217,12 +230,14 @@ describe('runEscalationAction: ruling(裁定の記録+ナレッジ還流)', () =
     expect(mocks.sendChatMessage).not.toHaveBeenCalled();
   });
 
-  it('還流の失敗は非ブロッキング(裁定の記録は保持し sent 扱い。再還流で回復可能 — 原則4)', async () => {
+  it('還流の失敗は非ブロッキングで sent=1+failed=1 を返す(記録成功・還流失敗の区別 — 原則4)', async () => {
     mocks.refluxResolutionToKnowledge.mockRejectedValue(new Error('embedding down'));
     const { pool, calls } = createMockPool(makeResponder());
     const summary = await runEscalationAction(pool, rulingParams);
 
-    expect(summary).toEqual({ sent: 1, skipped: 0, failed: 0 });
+    // sent=裁定の記録成功 / failed=還流失敗。ダッシュボードが「記録は成功・還流のみ失敗
+    // (再還流で回復可能)」をフラッシュで出し分けるための区別
+    expect(summary).toEqual({ sent: 1, skipped: 0, failed: 1 });
     expect(findCall(calls, 'SET resolution = $3')).toBeDefined();
   });
 

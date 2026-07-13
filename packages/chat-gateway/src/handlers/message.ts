@@ -18,6 +18,7 @@ import {
   MORNING_DIALOGUE_INSTRUCTION,
   MORNING_DIALOGUE_MAX_TURNS,
   MORNING_RESPONSE_SCHEMA,
+  RESOLUTION_TEXT_MAX_LENGTH,
   SYSTEM_PROMPT,
   TASK_COMPLETION_MATCH_INSTRUCTION,
   TASK_COMPLETION_MATCH_SCHEMA,
@@ -138,6 +139,9 @@ function closingNoteFor(dialogue: DialogueRow, maxTurns: number): string {
  * 単一対話内のターンは user/ai が交互だが、複数対話を平坦化した会話履歴では
  * 対話の境界で同一ロールが連続し得る(例: 前の対話の末尾が user・次の対話の先頭も user)。
  * Vertex のマルチターン規約(交互推奨)に合わせて安全側に倒す。
+ * 先頭が model になる履歴(朝の問いかけ等の AI 発話から始まる)は落とさない:
+ * 朝夕対話の継続(turnsToMessages(dialogue.turns, ...))が AI の初回問いかけを先頭に
+ * した contents を Phase 1 から本番送信しており、Gemini が受理する実績があるため。
  */
 function mergeConsecutiveTurns(turns: ChatTurn[]): ChatTurn[] {
   const merged: ChatTurn[] = [];
@@ -762,9 +766,6 @@ async function recordEscalationResolution(
 /** 裁定ゲートの中止ワード(「キャンセル」等)。 */
 const RESOLUTION_CANCEL_PATTERN = /^(キャンセル|やめる|やめます|やめて|中止|取り消し|取消)[。..!!]?$/;
 
-/** 裁定として記録するテキストの長さ上限。 */
-const RESOLUTION_MAX_LENGTH = 1000;
-
 /**
  * 裁定ゲート内の管理者メッセージの処理(M6)。
  * 提案理由受領ゲートと同様のガードを掛け、無条件キャプチャを防ぐ:
@@ -785,9 +786,9 @@ async function handleAwaitingResolutionMessage(
       text: '裁定の記録を中止しました。記録する場合は、エスカレーションカードの「裁定を記録」をもう一度押してください。',
     };
   }
-  if (trimmed.length > RESOLUTION_MAX_LENGTH) {
+  if (trimmed.length > RESOLUTION_TEXT_MAX_LENGTH) {
     return {
-      text: `裁定が長すぎるため記録しませんでした(${RESOLUTION_MAX_LENGTH}字以内)。裁定の記録待ちです。裁定を入力するか「キャンセル」と送ってください。`,
+      text: `裁定が長すぎるため記録しませんでした(${RESOLUTION_TEXT_MAX_LENGTH}字以内)。裁定の記録待ちです。裁定を入力するか「キャンセル」と送ってください。`,
     };
   }
   // 疑問符で終わる質問、タスク指示に合致するメッセージは裁定として記録しない。

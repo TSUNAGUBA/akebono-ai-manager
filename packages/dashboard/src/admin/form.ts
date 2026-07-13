@@ -53,12 +53,12 @@ export function requireRef(form: URLSearchParams, field: string, label: string):
 
 /**
  * 数値 ID(BIGINT 列の識別子)。requireRef は長さしか検証しないため、
- * 非数値が PG の 22P02(→ 500)に落ちる前に 400 で弾く
- * (プロジェクトのマイルストーン・タスク、エスカレーション、対話 ID 等で共用)。
+ * 非数値・BIGINT 範囲超(19 桁以上)が PG の 22P02 / 22003(→ 500)に落ちる前に
+ * 400 で弾く(プロジェクトのマイルストーン・タスク、エスカレーション、対話 ID 等で共用)。
  */
 export function requireNumericId(form: URLSearchParams, field: string, label: string): string {
   const value = requireRef(form, field, label);
-  if (!/^\d+$/.test(value)) {
+  if (!/^\d{1,18}$/.test(value)) {
     throw invalidInput(`${label}の指定が不正です。ページを再読み込みしてやり直してください`);
   }
   return value;

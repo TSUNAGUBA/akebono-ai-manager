@@ -101,6 +101,16 @@ export async function runKnowledgeSync(pool: pg.Pool): Promise<JobSummary> {
           hint: 'プロジェクトマスタの project_id とフォルダ名を一致させるとプロジェクトスコープ検索が有効になります',
         });
       }
+      // project/ 直下(IDセグメントなし)は規約外配置: どのプロジェクトにも帰属できない。
+      // 取り込みは継続する(顧客ID不一致と同じ非ブロッキング)が、意図した配置か気づけるよう警告する
+      if (docType === 'project_doc' && projectId === null) {
+        logger.warn('project/ 直下に文書が置かれています(プロジェクト帰属なしで取り込み)', {
+          docId: file.id,
+          name: file.name,
+          path: file.path,
+          hint: 'project/{プロジェクトID}/ 配下へ移動するとプロジェクトスコープ検索の対象になります',
+        });
+      }
       const chunks = chunkDocument(text);
 
       const existing = await query<{ chunk_index: number; content_hash: string }>(

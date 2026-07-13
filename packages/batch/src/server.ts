@@ -38,6 +38,7 @@ export interface JobParams {
   dialogueCreatedAt?: string;
   feedback?: string;
   feedbackId?: string;
+  refluxOnly?: string;
 }
 
 type JobRunner = (pool: pg.Pool, params: JobParams) => Promise<JobSummary>;
@@ -64,6 +65,7 @@ const ID_FIELDS = [
   'dialogueId',
   'dialogueCreatedAt',
   'feedbackId',
+  'refluxOnly',
 ] as const;
 /** 本文系の文字列フィールド。文字数の業務上限(1000/2000)はジョブ側で検証する。 */
 const TEXT_FIELDS = ['text', 'feedback'] as const;

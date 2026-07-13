@@ -4,6 +4,7 @@ import {
   escalationRecordingCard,
   escalationRefluxRetryCard,
   escalationResolvedCard,
+  isRefluxableResolutionType,
   logger,
   query,
   taskStateCard,
@@ -244,8 +245,17 @@ async function recordResolutionAction(
   const existing = await getEscalation(pool, escalationId);
   if (existing === undefined) return { text: '対象のエスカレーションが見つかりませんでした。' };
 
-  // 裁定済みだが未還流(還流失敗後の再実行): SoT の裁定からキャッシュへ再還流する(手動回復パス)
-  if (existing.status === 'resolved' && !existing.knowledge_reflected && existing.resolution !== null) {
+  // 裁定済みだが未還流(還流失敗後の再実行): SoT の裁定からキャッシュへ再還流する(手動回復パス)。
+  // 還流できるのは裁定(ruling / NULL=v0.12 以前の未分類)のみ(v0.12 §3 / ADR-18):
+  // ダッシュボードの解決アクションが作る admin_message(回答文)・no_action(解決メモ)は
+  // knowledge_reflected=false のまま残るが、decision_rules ナレッジ化してはならない
+  // (batch の reflux アクション・ダッシュボードの再還流表示と同じ shared の判定を使う)
+  if (
+    existing.status === 'resolved' &&
+    !existing.knowledge_reflected &&
+    existing.resolution !== null &&
+    isRefluxableResolutionType(existing.resolution_type)
+  ) {
     try {
       await refluxResolutionToKnowledge(pool, existing);
       return {

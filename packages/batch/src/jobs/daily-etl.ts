@@ -1,4 +1,4 @@
-import { AppError, ERROR_CODES, jstDateString, logger, query } from '@ai-manager/shared';
+import { AppError, ERROR_CODES, jstDateString, jstDateStringDaysAgo, logger, query } from '@ai-manager/shared';
 import type pg from 'pg';
 import type { JobSummary } from './morning-checkin.js';
 
@@ -16,17 +16,43 @@ export interface DailyEtlParams {
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
+ * 手動実行で許可する対象日の遡り上限(日数)。
+ * fact_workload は「その日の状態」の日次スナップショットで、過去分を遡って再計算できない。
+ * 定時 ETL の洗い替えが及ぶルックバック範囲(7日)を超えた過去日を手動実行すると、
+ * 確定済みの履歴スナップショットを「今日の状態」で上書きしてしまう(原則2: 記録系データの保護)。
+ * 未来日は集計対象が存在しないため同じく拒否する。
+ */
+const TARGET_DATE_MAX_DAYS_AGO = 7;
+
+/** カレンダー上実在する日付か(2026-02-31 等を DB エラーにせず 400 で弾く)。 */
+function isRealDate(value: string): boolean {
+  const date = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
+
+/**
  * 集計 ETL の手動実行(v0.12 §6)。ダッシュボードから OIDC 経由で起動され、
  * dwh.run_daily_etl(SECURITY DEFINER)を対象日で実行する。
- * 関数自体が対象日の DELETE→INSERT 洗い替えのため、何度実行しても冪等。
+ * 関数自体が対象日の DELETE→INSERT 洗い替えのため、許可範囲内なら何度実行しても冪等。
  */
 export async function runDailyEtl(pool: pg.Pool, params: DailyEtlParams = {}): Promise<JobSummary> {
   const targetDate = params.targetDate ?? jstDateString();
-  if (!DATE_PATTERN.test(targetDate)) {
+  if (!DATE_PATTERN.test(targetDate) || !isRealDate(targetDate)) {
     throw new AppError(ERROR_CODES.JOB_PARAMS_INVALID, 'targetDate は YYYY-MM-DD 形式で指定してください', {
       status: 400,
       details: { targetDate },
     });
+  }
+  // 対象日の有界化(TARGET_DATE_MAX_DAYS_AGO のコメント参照)。
+  // YYYY-MM-DD は辞書順比較がそのまま日付順比較になる
+  const today = jstDateString();
+  const oldest = jstDateStringDaysAgo(TARGET_DATE_MAX_DAYS_AGO);
+  if (targetDate > today || targetDate < oldest) {
+    throw new AppError(
+      ERROR_CODES.JOB_PARAMS_INVALID,
+      `targetDate は当日から ${TARGET_DATE_MAX_DAYS_AGO} 日前までの範囲で指定してください(未来日と、それ以前の確定済み履歴は再集計できません)`,
+      { status: 400, details: { targetDate, oldest, today } },
+    );
   }
 
   try {

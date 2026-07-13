@@ -1,10 +1,12 @@
 import {
   ESCALATION_ANSWER_PREFIX,
   getEscalation,
+  isRefluxableResolutionType,
   logger,
   query,
   recordResolution,
   refluxResolutionToKnowledge,
+  RESOLUTION_TEXT_MAX_LENGTH,
   sendChatMessage,
   type EscalationRow,
 } from '@ai-manager/shared';
@@ -34,9 +36,6 @@ function isEscalationAction(value: string): value is EscalationAction {
   return (ACTIONS as readonly string[]).includes(value);
 }
 
-/** 回答・裁定本文の上限(ダッシュボードのフォームと同じ制約をジョブ側でも検証)。 */
-const TEXT_MAX_LENGTH = 1000;
-
 /** no_action の既定の解決メモ(text 省略時)。 */
 const NO_ACTION_DEFAULT_TEXT = '回答不要として解決';
 
@@ -44,7 +43,8 @@ const NO_ACTION_DEFAULT_TEXT = '回答不要として解決';
  * エスカレーション解決アクション(v0.12 §3)。
  * SoT は ops.escalations(recordResolution が open のみ更新するため、
  * 並行する Chat の裁定フローと競合しても解決済みを上書きしない — 原則2)。
- * 戻り値: 処理成功 sent=1 / 競合等のスキップ skipped=1 / DM 送信失敗 failed=1。
+ * 戻り値: 処理成功 sent=1 / 競合等のスキップ skipped=1 / DM 送信失敗 failed=1
+ * (ruling の還流のみ失敗は sent=1+failed=1: 記録成功・還流失敗の区別)。
  */
 export async function runEscalationAction(
   pool: pg.Pool,
@@ -77,10 +77,18 @@ export async function runEscalationAction(
 
 /**
  * answer: メンバーへ回答を DM 送信して解決する。
- * adhoc-checkin と同じ SoT ファーストパターン: 対話レコード作成 → DM 送信 → 送信失敗時は
- * 補償削除して failed を返す(エスカレーションは open のまま残るため再操作できる)。
- * 解決の記録(recordResolution)は送信成功後に行う: 送信できていないのに resolved に
- * してしまうと「回答済みに見えるが本人に届いていない」状態になるため。
+ *
+ * クレームファースト設計(並行実行の二重 DM 防止):
+ * recordResolution(open → resolved の条件付き UPDATE)を送信前のアトミックなクレームとして
+ * 使う。並行する2つのリクエストのうちクレームに成功した一方だけが DM を送信でき、
+ * 敗者は skipped で終わる(送信後に記録する順序だと、両者が送信してから片方だけ記録される
+ * 二重 DM が起きる)。送信失敗時は対話レコードの補償削除に加えてエスカレーションを open へ
+ * 戻し、オペレーターが再操作できるようにする。
+ *
+ * 既知の制約(残余ウィンドウ): クレーム後〜送信前にプロセスが落ちた場合、
+ * 「resolved だが未送達」の状態が残る(補償が走れない数百ミリ秒の窓)。この場合
+ * エスカレーションは open に戻らないため、オペレーターは再操作ではなく本人への
+ * 送達状況の確認が必要になる(対話ログに escalation 対話が無いことで判別できる)。
  */
 async function answerEscalation(
   pool: pg.Pool,
@@ -88,21 +96,13 @@ async function answerEscalation(
   textParam: string | undefined,
   operatorUserId: string,
 ): Promise<JobSummary> {
-  const text = requireTextParam(textParam, 'text', TEXT_MAX_LENGTH);
+  const text = requireTextParam(textParam, 'text', RESOLUTION_TEXT_MAX_LENGTH);
   if (escalation.related_user_id === null) {
     throw invalidJobParams('対象メンバーのいないエスカレーションには回答を送信できません', {
       escalationId: escalation.escalation_id,
     });
   }
-  // 解決済みへの再操作は DM を送らずスキップする(再実行しても本人へ二重送信しない — 原則2)
-  if (escalation.status !== 'open') {
-    logger.warn('エスカレーションが既に解決済みのため回答送信をスキップします', {
-      escalationId: escalation.escalation_id,
-      status: escalation.status,
-    });
-    return { sent: 0, skipped: 1, failed: 0 };
-  }
-
+  // 配信先の検証はクレームより先に行う(DM 未登録でクレームだけ立てて巻き戻す無駄を避ける)
   const member = await query<{ chat_space_id: string | null }>(
     pool,
     'SELECT chat_space_id FROM ops.users WHERE user_id = $1',
@@ -114,6 +114,23 @@ async function answerEscalation(
       '対象メンバーの DM スペースが未登録のため回答を送信できません(本人が Chat アプリに一度話しかけると登録されます)',
       { escalationId: escalation.escalation_id, userId: escalation.related_user_id },
     );
+  }
+
+  // クレーム: open → resolved の条件付き UPDATE。undefined は並行敗者(既に解決済み)で、
+  // DM を送らずスキップする(二重送信の防止 — 原則2。解決済みも上書きしない)
+  const resolved = await recordResolution(
+    pool,
+    escalation.escalation_id,
+    operatorUserId,
+    text,
+    'admin_message',
+  );
+  if (resolved === undefined) {
+    logger.warn('エスカレーションが既に解決済みのため回答送信をスキップします(並行操作との競合を含む)', {
+      escalationId: escalation.escalation_id,
+      status: escalation.status,
+    });
+    return { sent: 0, skipped: 1, failed: 0 };
   }
 
   // 管理者経由の回答であることの明示(v0.12 §3)はコード側で必ず付与する(adhoc-checkin と同じ設計)
@@ -132,8 +149,9 @@ async function answerEscalation(
   try {
     await sendChatMessage(chatSpaceId, { text: fullText });
   } catch (sendErr) {
-    // 届いていない回答の対話レコードが残ると対話ログ上「回答済み」に見えてしまうため補償削除する。
-    // エスカレーションは open のまま(解決の記録前)なので、オペレーターは再操作できる
+    // 補償: 届いていない回答の対話レコードを削除し、クレームしたエスカレーションを open へ戻す
+    // (resolved のままだと「回答済みに見えるが本人に届いていない」不整合が残る)。
+    // status='resolved' 条件付きで、他プロセスの解決を誤って巻き戻さない
     if (dialogueId !== undefined) {
       await query(pool, 'DELETE FROM ops.dialogues WHERE dialogue_id = $1', [dialogueId]).catch(
         (cleanupErr: unknown) => {
@@ -141,27 +159,24 @@ async function answerEscalation(
         },
       );
     }
-    logger.error('エスカレーション回答の DM 送信に失敗しました(エスカレーションは open のまま)', sendErr, {
+    await query(
+      pool,
+      `UPDATE ops.escalations
+       SET status = 'open', resolution = NULL, resolution_type = NULL, resolved_by = NULL, resolved_at = NULL
+       WHERE escalation_id = $1 AND status = 'resolved'`,
+      [escalation.escalation_id],
+    ).catch((rollbackErr: unknown) => {
+      logger.error('回答送信失敗後のエスカレーション巻き戻しに失敗しました(resolved のまま未送達の可能性)', rollbackErr, {
+        escalationId: escalation.escalation_id,
+      });
+    });
+    logger.error('エスカレーション回答の DM 送信に失敗しました(open へ戻したため再操作できます)', sendErr, {
       escalationId: escalation.escalation_id,
       userId: escalation.related_user_id,
     });
     return { sent: 0, skipped: 0, failed: 1 };
   }
 
-  const resolved = await recordResolution(
-    pool,
-    escalation.escalation_id,
-    operatorUserId,
-    text,
-    'admin_message',
-  );
-  if (resolved === undefined) {
-    // 送信準備〜送信の間に別経路(Chat の裁定等)で解決された競合。解決済みは上書きしない(原則2)
-    logger.warn('回答は送信しましたが、エスカレーションは別経路で解決済みでした(解決の記録をスキップ)', {
-      escalationId: escalation.escalation_id,
-    });
-    return { sent: 0, skipped: 1, failed: 0 };
-  }
   logger.info('エスカレーションへの回答を送信して解決しました', {
     escalationId: escalation.escalation_id,
     userId: escalation.related_user_id,
@@ -174,6 +189,8 @@ async function answerEscalation(
  * ruling: 裁定を記録し、ナレッジ(decision_rules)へ還流する。
  * 還流の失敗は非ブロッキング(原則4): SoT(裁定の記録)は保持され knowledge_reflected=false の
  * まま残るため、ダッシュボードの「再還流」(action='reflux')で回復できる(手動回復パス — 原則6)。
+ * 還流のみ失敗した場合は sent=1(裁定の記録成功)+failed=1(還流失敗)を返し、
+ * ダッシュボード側が「記録は成功・還流のみ失敗」をフラッシュで出し分けられるようにする。
  */
 async function recordRuling(
   pool: pg.Pool,
@@ -181,7 +198,7 @@ async function recordRuling(
   textParam: string | undefined,
   operatorUserId: string,
 ): Promise<JobSummary> {
-  const text = requireTextParam(textParam, 'text', TEXT_MAX_LENGTH);
+  const text = requireTextParam(textParam, 'text', RESOLUTION_TEXT_MAX_LENGTH);
   const resolved = await recordResolution(pool, escalation.escalation_id, operatorUserId, text, 'ruling');
   if (resolved === undefined) {
     logger.warn('エスカレーションが既に解決済みのため裁定の記録をスキップします', {
@@ -196,6 +213,7 @@ async function recordRuling(
       escalationId: escalation.escalation_id,
       error: String(err),
     });
+    return { sent: 1, skipped: 0, failed: 1 };
   }
   logger.info('裁定を記録しました', { escalationId: escalation.escalation_id });
   return { sent: 1, skipped: 0, failed: 0 };
@@ -212,7 +230,7 @@ async function resolveWithoutAction(
   const text =
     textParam === undefined || textParam.trim() === ''
       ? NO_ACTION_DEFAULT_TEXT
-      : requireTextParam(textParam, 'text', TEXT_MAX_LENGTH);
+      : requireTextParam(textParam, 'text', RESOLUTION_TEXT_MAX_LENGTH);
   const resolved = await recordResolution(pool, escalation.escalation_id, operatorUserId, text, 'no_action');
   if (resolved === undefined) {
     logger.warn('エスカレーションが既に解決済みのため回答不要の記録をスキップします', {
@@ -238,9 +256,9 @@ async function refluxAgain(pool: pg.Pool, escalation: EscalationRow): Promise<Jo
       status: escalation.status,
     });
   }
-  // 還流対象は裁定のみ(NULL は v0.12 以前の未分類=裁定)。admin_message / no_action の
-  // 解決メモをナレッジ化しない(ダッシュボード側も同条件で防御する二段構え — ADR-18)
-  if (escalation.resolution_type !== null && escalation.resolution_type !== 'ruling') {
+  // 還流対象は裁定のみ(admin_message / no_action の解決メモをナレッジ化しない)。
+  // 判定は shared の共通述語を使う(Chat・dashboard と条件を分散させない — ADR-18)
+  if (!isRefluxableResolutionType(escalation.resolution_type)) {
     throw invalidJobParams('裁定(ruling)以外の解決は再還流できません', {
       escalationId: escalation.escalation_id,
       resolutionType: escalation.resolution_type,

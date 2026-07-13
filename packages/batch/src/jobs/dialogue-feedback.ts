@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import {
   embedTexts,
   FEEDBACK_CORRECTION_INSTRUCTION,
+  FEEDBACK_TEXT_MAX_LENGTH,
   feedbackCorrectionFallback,
   generateContent,
   logger,
@@ -15,11 +16,14 @@ import { invalidJobParams, requireParam, requireTextParam, verifyAdminOperator }
 import type { JobSummary } from './morning-checkin.js';
 
 /**
- * ジョブパラメータ(v0.12 §7)。2形態を受け付ける:
+ * ジョブパラメータ(v0.12 §7)。3形態を受け付ける:
  * - 新規: { dialogueId, dialogueCreatedAt, feedback, operatorUserId }
  *   対話は dialogue_id と created_at の両方で特定する(ops.dialogues は
  *   created_at のレンジパーティション表で、複合 PK の片方だけでは行を特定できないため)
- * - 再送: { feedbackId } — status='pending' の既存フィードバックの配信を再試行する
+ * - 再送: { feedbackId, operatorUserId } — status='pending' の既存フィードバックの配信を再試行する
+ * - 還流のみ再試行: { feedbackId, refluxOnly: 'true', operatorUserId } —
+ *   status='delivered' かつ knowledge_reflected=false の還流を再試行する(DM は送らない。
+ *   配信は成功したが還流だけ失敗したケースの回復経路)
  */
 export interface DialogueFeedbackParams {
   dialogueId?: string;
@@ -27,12 +31,10 @@ export interface DialogueFeedbackParams {
   feedback?: string;
   operatorUserId?: string;
   feedbackId?: string;
+  refluxOnly?: string;
 }
 
-/** フィードバック本文の上限(ダッシュボードのフォームと同じ制約をジョブ側でも検証)。 */
-const FEEDBACK_MAX_LENGTH = 2000;
-
-/** 配信に必要なフィードバック文脈(新規 INSERT 直後・再送ロードの両形態を同形に正規化)。 */
+/** 配信に必要なフィードバック文脈(新規 INSERT 直後・既存行ロードの各形態を同形に正規化)。 */
 interface FeedbackContext {
   feedbackId: string;
   dialogueId: string;
@@ -41,6 +43,17 @@ interface FeedbackContext {
   knowledgeReflected: boolean;
   /** 元対話(質問と誤回答)の整形済みテキスト。取得不能時はその旨の定型文 */
   originalBlock: string;
+}
+
+/** ops.dialogue_feedback の既存行(再送・還流のみ再試行が参照する列)。 */
+interface FeedbackRow {
+  feedback_id: string;
+  dialogue_id: string;
+  dialogue_created_at: string | Date;
+  user_id: string;
+  feedback: string;
+  status: string;
+  knowledge_reflected: boolean;
 }
 
 function hashText(text: string): string {
@@ -66,12 +79,19 @@ function formatDialogueTurns(turns: unknown): string {
  *
  * SoT は ops.dialogue_feedback(status: pending=未送達・再送可能 / delivered=送達済み)。
  * rag.knowledge_chunks の doc_id='feedback/{id}' チャンクはその還流キャッシュ(原則6)。
- * 戻り値: 送達成功 sent=1 / 送達失敗(pending のまま=再送可能) failed=1。
+ * 戻り値: 送達成功 sent=1 / 並行実行との競合 skipped=1 /
+ * 送達失敗(pending のまま=再送可能) failed=1。
  */
 export async function runDialogueFeedback(
   pool: pg.Pool,
   params: DialogueFeedbackParams = {},
 ): Promise<JobSummary> {
+  if (params.refluxOnly !== undefined && params.refluxOnly !== 'true') {
+    throw invalidJobParams(`refluxOnly は 'true' のみ指定できます`, { refluxOnly: params.refluxOnly });
+  }
+  if (params.refluxOnly === 'true') {
+    return retryRefluxOnly(pool, params);
+  }
   const context =
     params.feedbackId === undefined
       ? await registerFeedback(pool, params)
@@ -86,7 +106,7 @@ async function registerFeedback(
 ): Promise<FeedbackContext> {
   const dialogueId = requireParam(params.dialogueId, 'dialogueId');
   const dialogueCreatedAt = requireParam(params.dialogueCreatedAt, 'dialogueCreatedAt');
-  const feedback = requireTextParam(params.feedback, 'feedback', FEEDBACK_MAX_LENGTH);
+  const feedback = requireTextParam(params.feedback, 'feedback', FEEDBACK_TEXT_MAX_LENGTH);
   const operatorUserId = requireParam(params.operatorUserId, 'operatorUserId');
   if (Number.isNaN(Date.parse(dialogueCreatedAt))) {
     throw invalidJobParams('dialogueCreatedAt は ISO 形式の日時で指定してください', { dialogueCreatedAt });
@@ -127,32 +147,19 @@ async function registerFeedback(
 }
 
 /**
- * 再送形態: pending の既存フィードバックをロードする。
- * delivered は対象外(本人へ同じ訂正を二重配信しない — 原則2)。
+ * 既存フィードバック形態(再送・還流のみ再試行)の共通検証+ロード。
+ * 操作者の admin 検証は新規形態と対称に必須(多層防御)。
  */
-async function loadPendingFeedback(
-  pool: pg.Pool,
-  params: DialogueFeedbackParams,
-): Promise<FeedbackContext> {
+async function loadFeedbackRow(pool: pg.Pool, params: DialogueFeedbackParams): Promise<FeedbackRow> {
   const feedbackId = requireParam(params.feedbackId, 'feedbackId');
-  // 再送は SoT の既存行を使うため新規パラメータとは併用できない(取り違え防止)
+  // 既存行を使う形態のため新規登録のパラメータとは併用できない(取り違え防止)
   if (params.dialogueId !== undefined || params.dialogueCreatedAt !== undefined || params.feedback !== undefined) {
-    throw invalidJobParams('feedbackId(再送)と新規登録のパラメータは同時に指定できません');
+    throw invalidJobParams('feedbackId(再送・還流再試行)と新規登録のパラメータは同時に指定できません');
   }
-  // 再送起動でも操作者が渡された場合は同様に検証する(多層防御)
-  if (params.operatorUserId !== undefined) {
-    await verifyAdminOperator(pool, params.operatorUserId);
-  }
+  const operatorUserId = requireParam(params.operatorUserId, 'operatorUserId');
+  await verifyAdminOperator(pool, operatorUserId);
 
-  const result = await query<{
-    feedback_id: string;
-    dialogue_id: string;
-    dialogue_created_at: string | Date;
-    user_id: string;
-    feedback: string;
-    status: string;
-    knowledge_reflected: boolean;
-  }>(
+  const result = await query<FeedbackRow>(
     pool,
     `SELECT feedback_id, dialogue_id, dialogue_created_at, user_id, feedback, status, knowledge_reflected
      FROM ops.dialogue_feedback WHERE feedback_id = $1`,
@@ -162,14 +169,11 @@ async function loadPendingFeedback(
   if (row === undefined) {
     throw invalidJobParams('指定のフィードバックが見つかりません', { feedbackId });
   }
-  if (row.status !== 'pending') {
-    throw invalidJobParams('配信済みのフィードバックは再送できません(二重配信の防止)', {
-      feedbackId,
-      status: row.status,
-    });
-  }
+  return row;
+}
 
-  // 元対話は文脈供給用のため、取得できなくても再送自体は止めない(訂正の送達を優先 — 原則4)
+/** 既存行を配信文脈へ正規化する(元対話が取得できなくても止めない — 原則4)。 */
+async function toFeedbackContext(pool: pg.Pool, row: FeedbackRow): Promise<FeedbackContext> {
   const dialogue = await query<{ turns: unknown }>(
     pool,
     `SELECT turns FROM ops.dialogues WHERE dialogue_id = $1 AND created_at = $2`,
@@ -177,8 +181,8 @@ async function loadPendingFeedback(
   );
   const turns = dialogue.rows[0]?.turns;
   if (turns === undefined) {
-    logger.warn('フィードバック対象の元対話を取得できませんでした(フィードバック本文のみで配信を継続)', {
-      feedbackId,
+    logger.warn('フィードバック対象の元対話を取得できませんでした(フィードバック本文のみで処理を継続)', {
+      feedbackId: row.feedback_id,
       dialogueId: row.dialogue_id,
     });
   }
@@ -190,6 +194,50 @@ async function loadPendingFeedback(
     knowledgeReflected: row.knowledge_reflected,
     originalBlock: formatDialogueTurns(turns),
   };
+}
+
+/**
+ * 再送形態: pending の既存フィードバックをロードする。
+ * delivered は対象外(本人へ同じ訂正を二重配信しない — 原則2)。
+ */
+async function loadPendingFeedback(
+  pool: pg.Pool,
+  params: DialogueFeedbackParams,
+): Promise<FeedbackContext> {
+  const row = await loadFeedbackRow(pool, params);
+  if (row.status !== 'pending') {
+    throw invalidJobParams('配信済みのフィードバックは再送できません(二重配信の防止)', {
+      feedbackId: row.feedback_id,
+      status: row.status,
+    });
+  }
+  return toFeedbackContext(pool, row);
+}
+
+/**
+ * 還流のみ再試行(v0.12 §7): 配信は成功したが還流だけ失敗した
+ * 「delivered かつ knowledge_reflected=false」の回復経路。DM は送らない。
+ * pending は再送(通常形態)が還流も再試行するため対象外。
+ * オペレーターが明示的に還流を求めている操作のため、失敗はジョブ失敗として送出する
+ * (escalation-action の reflux と同じ設計 — 画面にエラー表示させる)。
+ */
+async function retryRefluxOnly(pool: pg.Pool, params: DialogueFeedbackParams): Promise<JobSummary> {
+  const row = await loadFeedbackRow(pool, params);
+  if (row.status !== 'delivered') {
+    throw invalidJobParams('還流の再試行は配信済みのフィードバックのみ対象です(未配信は再送を使ってください)', {
+      feedbackId: row.feedback_id,
+      status: row.status,
+    });
+  }
+  if (row.knowledge_reflected) {
+    // 既に還流済みの再実行は no-op(冪等。embedding の再計算コストも避ける)
+    logger.info('既にナレッジへ還流済みのためスキップします', { feedbackId: row.feedback_id });
+    return { sent: 0, skipped: 1, failed: 0 };
+  }
+  const context = await toFeedbackContext(pool, row);
+  await refluxFeedbackToKnowledge(pool, context);
+  logger.info('フィードバックをナレッジへ再還流しました', { feedbackId: row.feedback_id });
+  return { sent: 1, skipped: 0, failed: 0 };
 }
 
 /**
@@ -239,9 +287,20 @@ async function refluxFeedbackToKnowledge(pool: pg.Pool, context: FeedbackContext
 }
 
 /**
- * 配信フロー(両形態共通): 還流 → 謝罪+訂正メッセージ生成 → 対話レコード作成 → DM 送信 →
- * 送達の記録。adhoc-checkin と同じ SoT ファースト+補償削除パターン。
- * 送信に失敗した場合、フィードバックは pending のまま残るため再送で回復できる。
+ * 配信フロー(新規・再送共通): 還流 → 謝罪+訂正メッセージ生成 → 対話レコード作成 →
+ * 送達のクレーム → DM 送信。
+ *
+ * クレームファースト設計(並行実行の二重 DM 防止): DM 送信の前に
+ * pending → delivered の条件付き UPDATE(RETURNING)でアトミックに送達をクレームする。
+ * 並行する2つのリクエストのうちクレームに成功した一方だけが DM を送信でき、敗者は
+ * 自分の対話レコードを片付けて skipped で終わる(送信後に記録する順序だと、両者が
+ * 送信してから片方だけ記録される二重 DM が起きる)。送信失敗時は pending へ戻す補償で
+ * 再送可能な状態に回復する。
+ *
+ * 既知の制約(残余ウィンドウ): クレーム後〜送信前にプロセスが落ちた場合、
+ * 「delivered だが未送達」の状態が残る(補償が走れない数百ミリ秒の窓)。この場合
+ * 再送は二重配信防止により拒否されるため、オペレーターは本人への送達状況を確認のうえ、
+ * 必要なら新規フィードバックとして登録し直す。
  */
 async function deliverCorrection(pool: pg.Pool, context: FeedbackContext): Promise<JobSummary> {
   // 1. ナレッジ還流(未還流の場合のみ)。失敗は非ブロッキング(原則4):
@@ -320,37 +379,61 @@ async function deliverCorrection(pool: pg.Pool, context: FeedbackContext): Promi
     ],
   );
   const correctionDialogueId = inserted.rows[0]?.dialogue_id;
+
+  /** 補償: 未送達に終わった自分の訂正対話レコードを片付ける(送達済みに見せない)。 */
+  const deleteOwnDialogue = async (): Promise<void> => {
+    if (correctionDialogueId === undefined) return;
+    await query(pool, 'DELETE FROM ops.dialogues WHERE dialogue_id = $1', [correctionDialogueId]).catch(
+      (cleanupErr: unknown) => {
+        logger.error('未送達の訂正対話レコード削除に失敗しました', cleanupErr, {
+          feedbackId: context.feedbackId,
+          dialogueId: correctionDialogueId,
+        });
+      },
+    );
+  };
+
+  // 5. 送達のクレーム(冒頭コメント参照)。pending → delivered の条件付き UPDATE が
+  //    0行なら並行敗者: DM を送らず自分の対話レコードを片付けてスキップ(二重配信の防止 — 原則2)
+  const claimed = await query<{ feedback_id: string }>(
+    pool,
+    `UPDATE ops.dialogue_feedback
+     SET status = 'delivered', delivered_at = now(), correction_dialogue_id = $2
+     WHERE feedback_id = $1 AND status = 'pending'
+     RETURNING feedback_id`,
+    [context.feedbackId, correctionDialogueId ?? null],
+  );
+  if (claimed.rows.length === 0) {
+    await deleteOwnDialogue();
+    logger.warn('フィードバックは並行する実行が配信済みのためスキップします(二重配信の防止)', {
+      feedbackId: context.feedbackId,
+    });
+    return { sent: 0, skipped: 1, failed: 0 };
+  }
+
+  // 6. DM 送信。失敗時はクレームを pending へ戻す補償で再送可能な状態に回復する
   try {
     await sendChatMessage(chatSpaceId, { text: messageText });
   } catch (sendErr) {
-    // 届いていない訂正の対話レコードが残ると送達済みに見えてしまうため補償削除する。
-    // フィードバックは pending のまま(送達の記録前)なので再送で回復できる
-    if (correctionDialogueId !== undefined) {
-      await query(pool, 'DELETE FROM ops.dialogues WHERE dialogue_id = $1', [correctionDialogueId]).catch(
-        (cleanupErr: unknown) => {
-          logger.error('配信失敗後の訂正対話レコード削除に失敗しました', cleanupErr, {
-            feedbackId: context.feedbackId,
-            dialogueId: correctionDialogueId,
-          });
-        },
-      );
-    }
-    logger.error('訂正メッセージの DM 送信に失敗しました(フィードバックは pending のまま=再送可能)', sendErr, {
+    await query(
+      pool,
+      `UPDATE ops.dialogue_feedback
+       SET status = 'pending', delivered_at = NULL, correction_dialogue_id = NULL
+       WHERE feedback_id = $1 AND status = 'delivered'`,
+      [context.feedbackId],
+    ).catch((rollbackErr: unknown) => {
+      logger.error('配信失敗後のフィードバック巻き戻しに失敗しました(delivered のまま未送達の可能性)', rollbackErr, {
+        feedbackId: context.feedbackId,
+      });
+    });
+    await deleteOwnDialogue();
+    logger.error('訂正メッセージの DM 送信に失敗しました(pending へ戻したため再送できます)', sendErr, {
       feedbackId: context.feedbackId,
       userId: context.userId,
     });
     return { sent: 0, skipped: 0, failed: 1 };
   }
 
-  // 5. 送達の記録。status='pending' 条件付き UPDATE で、並行実行と競合しても
-  //    送達済みの記録(delivered_at・correction_dialogue_id)を上書きしない(原則2)
-  await query(
-    pool,
-    `UPDATE ops.dialogue_feedback
-     SET status = 'delivered', delivered_at = now(), correction_dialogue_id = $2
-     WHERE feedback_id = $1 AND status = 'pending'`,
-    [context.feedbackId, correctionDialogueId ?? null],
-  );
   logger.info('謝罪+訂正メッセージを配信しました', {
     feedbackId: context.feedbackId,
     userId: context.userId,

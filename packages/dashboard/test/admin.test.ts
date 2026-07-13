@@ -17,6 +17,7 @@ import {
   optionalInt,
   optionalText,
   requireId,
+  requireNumericId,
   requireRef,
   requireText,
 } from '../src/admin/form.js';
@@ -228,6 +229,19 @@ describe('マスタ管理フォームの入力検証', () => {
   it('isChecked: チェックボックスの有無を判定する', () => {
     expect(isChecked(form({ active: 'on' }), 'active')).toBe(true);
     expect(isChecked(form({}), 'active')).toBe(false);
+  });
+
+  it('requireNumericId: 数値のみ・18桁以内を受け入れる(BIGINT 範囲超で 500 にしない)', () => {
+    expect(requireNumericId(form({ id: '42' }), 'id', 'ID')).toBe('42');
+    expect(requireNumericId(form({ id: '9'.repeat(18) }), 'id', 'ID')).toBe('9'.repeat(18));
+    // 非数値・19 桁(BIGINT 上限 9223372036854775807 = 19 桁を超え得る)・空は AIM-6004(400)
+    for (const bad of ['abc', '1.5', '-1', '9'.repeat(19), '']) {
+      expectAppError(
+        () => requireNumericId(form({ id: bad }), 'id', 'ID'),
+        ERROR_CODES.ADMIN_INPUT_INVALID,
+        400,
+      );
+    }
   });
 
   it('ID_PATTERN が要件の正規表現と一致する', () => {

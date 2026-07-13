@@ -1084,3 +1084,52 @@ describe('随時 QA の会話履歴参照(v0.12 §5)', () => {
     );
   });
 });
+
+describe('顧客⇔プロジェクト相関の文脈供給(v0.13)', () => {
+  it('顧客名を明示した「進んでいるプロジェクトは?」に登録プロジェクト一覧が供給される(MSJ シナリオの再現)', async () => {
+    mocks.generateJson.mockResolvedValueOnce({
+      value: { answer: '進行中のプロジェクトは「しまむらWMS」です。', confidence: 'high' },
+      result: llmResult,
+    });
+    const { pool } = createMockPool((text, params) => {
+      if (text.includes('FROM ops.suggestions')) return { rows: [] };
+      if (text.includes('INSERT INTO ops.dialogues')) {
+        return { rows: [{ dialogue_id: '61', created_at: new Date() }] };
+      }
+      if (text.includes('FROM ops.dialogues')) return { rows: [] };
+      if (text.includes('FROM ops.tasks t')) return { rows: [] };
+      // 質問文の名称照合 → 顧客のみ一致(プロジェクト名は含まれない質問)
+      if (text.includes('WITH candidates') && text.includes('FROM ops.customers')) {
+        return { rows: [{ customer_id: 'shimamura', match_text: 'しまむら' }] };
+      }
+      if (text.includes('WITH candidates') && text.includes('FROM ops.projects')) {
+        return { rows: [] };
+      }
+      if (text.includes('WITH RECURSIVE reach')) {
+        return { rows: [{ customer_ids: ['shimamura'], industry_ids: [] }] };
+      }
+      if (text.includes('FROM ops.customers c')) {
+        return { rows: [{ customer_id: 'shimamura', name: 'しまむら', industries: ['小売業'] }] };
+      }
+      if (text.includes('FROM ops.customer_relations')) return { rows: [] };
+      // 顧客の登録プロジェクト(v0.13)
+      if (text.includes('FROM ops.projects') && text.includes('WHERE customer_id')) {
+        return { rows: [{ name: 'しまむらWMS', status: 'active' }] };
+      }
+      return { rows: [] };
+    });
+
+    const response = await handleMessage(
+      pool,
+      messageEvent('しまむらで進んでいるプロジェクトは?'),
+      member,
+    );
+
+    // 顧客マスタ情報ブロックに登録プロジェクトが確定情報として入る
+    const genCall = mocks.generateJson.mock.calls[0]?.[0] as { system: string };
+    expect(genCall.system).toContain('## 顧客マスタ情報');
+    expect(genCall.system).toContain('### 登録プロジェクト');
+    expect(genCall.system).toContain('- しまむらWMS(進行中)');
+    expect(response.text).toBe('進行中のプロジェクトは「しまむらWMS」です。');
+  });
+});

@@ -127,4 +127,19 @@ describe('runKnowledgeSync(プロジェクトナレッジ — v0.12 §4)', () =>
     // 業界(industry_id は NULL 化)と異なり、後からのマスタ登録で有効になるよう保持する
     expect(findCall(calls, 'INSERT INTO rag.knowledge_chunks')?.params[4]).toBe('p1');
   });
+
+  it('project/ 直下(IDセグメントなし)の規約外配置も帰属なしで取り込みを継続する(警告のみ)', async () => {
+    mocks.listFilesRecursive.mockResolvedValue({
+      files: [{ ...projectFile, id: 'doc-root', path: 'project' }],
+      unresolvedShortcuts: [],
+    });
+    const { pool, calls } = createMockPool(baseResponder);
+    const summary = await runKnowledgeSync(pool);
+
+    // 非ブロッキング(顧客ID不一致と同じ): 取り込みは止めず project_id なしで登録する
+    expect(summary).toEqual({ sent: 1, skipped: 0, failed: 0 });
+    const insert = findCall(calls, 'INSERT INTO rag.knowledge_chunks');
+    expect(insert?.params[1]).toBe('project_doc');
+    expect(insert?.params[4]).toBeNull();
+  });
 });

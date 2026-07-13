@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { jstDateString } from '@ai-manager/shared';
+import { jstDateString, jstDateStringDaysAgo } from '@ai-manager/shared';
 import { runDailyEtl } from '../src/jobs/daily-etl.js';
 import { createMockPool, findCall } from './mock-pool.js';
 
@@ -16,16 +16,41 @@ describe('runDailyEtl(集計の手動実行 — v0.12 §6)', () => {
     expect(etl?.params).toEqual([jstDateString()]);
   });
 
-  it('targetDate 指定時はその日付で実行する(過去日の再集計)', async () => {
+  it('targetDate 指定時はその日付で実行する(許容範囲内の過去日の再集計)', async () => {
+    const targetDate = jstDateStringDaysAgo(3);
     const { pool, calls } = createMockPool();
-    const summary = await runDailyEtl(pool, { targetDate: '2026-07-01' });
+    const summary = await runDailyEtl(pool, { targetDate });
 
     expect(summary).toEqual({ sent: 1, skipped: 0, failed: 0 });
-    expect(findCall(calls, 'dwh.run_daily_etl')?.params).toEqual(['2026-07-01']);
+    expect(findCall(calls, 'dwh.run_daily_etl')?.params).toEqual([targetDate]);
   });
 
-  it('YYYY-MM-DD 形式でない targetDate は AIM-5005(400)で ETL を実行しない', async () => {
-    for (const bad of ['2026/07/01', '2026-7-1', '20260701', 'today', '2026-07-01T00:00:00Z']) {
+  it('遡り上限(7日前)ちょうどは許可する(境界値)', async () => {
+    const targetDate = jstDateStringDaysAgo(7);
+    const { pool, calls } = createMockPool();
+    await expect(runDailyEtl(pool, { targetDate })).resolves.toEqual({
+      sent: 1,
+      skipped: 0,
+      failed: 0,
+    });
+    expect(findCall(calls, 'dwh.run_daily_etl')?.params).toEqual([targetDate]);
+  });
+
+  it('YYYY-MM-DD 形式でない・実在しない targetDate は AIM-5005(400)で ETL を実行しない', async () => {
+    for (const bad of ['2026/07/01', '2026-7-1', '20260701', 'today', '2026-07-01T00:00:00Z', '2026-02-31']) {
+      const { pool, calls } = createMockPool();
+      await expect(runDailyEtl(pool, { targetDate: bad })).rejects.toMatchObject({
+        code: 'AIM-5005',
+        status: 400,
+      });
+      expect(findCall(calls, 'dwh.run_daily_etl')).toBeUndefined();
+    }
+  });
+
+  it('範囲外の対象日(8日前・未来日)は AIM-5005(400)で拒否する(確定済み履歴の上書き防止 — 原則2)', async () => {
+    // fact_workload は日次スナップショットで遡及再計算できないため、定時 ETL の
+    // ルックバック範囲(7日)を超える過去日の洗い替えは履歴を「今日の状態」で壊す
+    for (const bad of [jstDateStringDaysAgo(8), jstDateStringDaysAgo(-1)]) {
       const { pool, calls } = createMockPool();
       await expect(runDailyEtl(pool, { targetDate: bad })).rejects.toMatchObject({
         code: 'AIM-5005',
@@ -40,7 +65,7 @@ describe('runDailyEtl(集計の手動実行 — v0.12 §6)', () => {
       if (text.includes('dwh.run_daily_etl')) return new Error('etl down');
       return undefined;
     });
-    await expect(runDailyEtl(pool, { targetDate: '2026-07-01' })).rejects.toMatchObject({
+    await expect(runDailyEtl(pool, { targetDate: jstDateStringDaysAgo(1) })).rejects.toMatchObject({
       code: 'AIM-5006',
     });
   });

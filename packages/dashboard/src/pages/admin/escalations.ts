@@ -1,4 +1,11 @@
-import { ERROR_CODES, escalationReasonLabel, optionalEnv, query } from '@ai-manager/shared';
+import {
+  ERROR_CODES,
+  escalationReasonLabel,
+  isRefluxableResolutionType,
+  optionalEnv,
+  query,
+  RESOLUTION_TEXT_MAX_LENGTH,
+} from '@ai-manager/shared';
 import type pg from 'pg';
 import { badge, responsiveTable, section, statusBadge } from '../../render/components.js';
 import { h, html, raw, type Raw } from '../../render/html.js';
@@ -55,6 +62,8 @@ interface EscalationRow {
   knowledge_reflected: boolean;
   related_user_id: string | null;
   related_user_name: string | null;
+  /** 対象メンバーの DM スペース登録済みか(未登録は送信してもスキップされるため事前に出し分ける)。 */
+  related_dm_ready: boolean;
   created: string;
   resolved: string | null;
 }
@@ -63,6 +72,7 @@ interface EscalationRow {
 const ESCALATION_SELECT = `SELECT e.escalation_id::text AS escalation_id, e.reason, e.context, e.status,
        e.resolution, e.resolution_type, e.knowledge_reflected,
        e.related_user_id, u.display_name AS related_user_name,
+       (u.chat_space_id IS NOT NULL) AS related_dm_ready,
        to_char(e.created_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD HH24:MI') AS created,
        to_char(e.resolved_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD HH24:MI') AS resolved
   FROM ops.escalations e
@@ -77,28 +87,40 @@ const ESCALATION_SUCCESS_MESSAGES: Record<string, string> = {
 };
 
 const ESCALATION_ERROR_MESSAGES: Record<string, string> = {
+  // batch がジョブ実行後にエラー応答(500)を返すケースも包含するため「起動または実行」と表現する
   request:
-    'エスカレーション操作の起動に失敗しました。batch サービスの状態とログ(AIM-6009)を確認してください',
+    'エスカレーション操作の起動または実行に失敗しました。batch サービスの状態とログ(AIM-6009)を確認してください',
   timeout:
     '応答待ちがタイムアウトしました。処理はバックグラウンドで継続している可能性があるため、しばらくしてからこのページを再読み込みして状態を確認してください',
 };
 
 function escalationFlash(ctx: AdminPageContext): Raw {
   const params = ctx.url.searchParams;
-  for (const [param, message] of Object.entries(ESCALATION_SUCCESS_MESSAGES)) {
-    if (params.get(param) !== '1') continue;
+  for (const [action, def] of Object.entries(ESCALATION_ACTIONS)) {
+    if (params.get(def.successParam) !== '1') continue;
     // JobSummary の failed/skipped を反映する(起動は成功しても処理が失敗・スキップされ得る)
     if (flashCount(params, 'failed') !== '0') {
+      // 裁定は「記録は成功・還流のみ失敗」を sent=1, failed=1 で返す(batch との契約)。
+      // 全面成功の文言を出さず、再還流の手動回復パスへ誘導する
+      if (action === 'ruling') {
+        return raw(
+          `<div class="alert error">裁定は記録しましたが、ナレッジへの反映に失敗しました。解決済み一覧の「ナレッジ還流を再試行」で再反映できます</div>`,
+        );
+      }
       return raw(
         `<div class="alert error">操作は受理されましたが処理に失敗しました。batch のログ(AIM-6009)を確認してください</div>`,
       );
     }
     if (flashCount(params, 'sent') === '0' && flashCount(params, 'skipped') !== '0') {
-      return raw(
-        `<div class="alert ok">対象は処理済みのためスキップされました(別の管理者が既に解決した可能性があります)</div>`,
-      );
+      // skipped の意味はアクションで異なる: 解決系は「別経路で解決済み(クレームファーストにより
+      // DM 未送信が保証される)」、還流再試行は「既に還流済み」
+      return action === 'reflux'
+        ? raw(`<div class="alert ok">既にナレッジへ還流済みでした</div>`)
+        : raw(
+            `<div class="alert ok">別の経路で既に解決済みのため、送信・記録は行いませんでした</div>`,
+          );
     }
-    return raw(`<div class="alert ok">${h(message)}</div>`);
+    return raw(`<div class="alert ok">${h(ESCALATION_SUCCESS_MESSAGES[def.successParam] ?? '')}</div>`);
   }
   const errorKey = params.get('escalation_error');
   // own-property チェック: 継承プロパティ名を誤ってメッセージ扱いしない(checkin と同旨)
@@ -112,9 +134,11 @@ function escalationFlash(ctx: AdminPageContext): Raw {
 
 /** 長文(状況・解決内容)の折りたたみ表示。改行は保持し、HTML はエスケープする。 */
 function foldedText(text: string): Raw {
-  if (text.length <= FOLD_THRESHOLD) return raw(`<span class="pre-wrap">${h(text)}</span>`);
+  // コードポイント単位で切る(String#slice はサロゲートペア(絵文字等)を分断し得る)
+  const chars = [...text];
+  if (chars.length <= FOLD_THRESHOLD) return raw(`<span class="pre-wrap">${h(text)}</span>`);
   return raw(
-    `<details class="fold"><summary>${h(text.slice(0, FOLD_THRESHOLD))}…</summary><div class="pre-wrap">${h(text)}</div></details>`,
+    `<details class="fold"><summary>${h(chars.slice(0, FOLD_THRESHOLD).join(''))}…</summary><div class="pre-wrap">${h(text)}</div></details>`,
   );
 }
 
@@ -180,12 +204,13 @@ export async function renderAdminEscalations(pool: pg.Pool, ctx: AdminPageContex
     { emptyText: '未対応のエスカレーションはありません' },
   );
 
-  // 裁定(ruling / NULL=旧データの裁定)で還流未了の行のみ再試行できる(v0.12 §3)
+  // 裁定(ruling / NULL=旧データの裁定)で還流未了の行のみ再試行できる(v0.12 §3。
+  // 判定は shared の isRefluxableResolutionType — Chat・batch と条件を共有する)
   const refluxForm = (row: EscalationRow): Raw => {
     const eligible =
       row.status === 'resolved' &&
       !row.knowledge_reflected &&
-      (row.resolution_type === 'ruling' || row.resolution_type === null);
+      isRefluxableResolutionType(row.resolution_type);
     if (!eligible || batchUrl === '') return raw('—');
     return raw(`<form method="post" action="${PATH}" class="inline-form"
       onsubmit="return confirm('この裁定のナレッジ還流を再試行しますか?')">
@@ -211,30 +236,36 @@ export async function renderAdminEscalations(pool: pg.Pool, ctx: AdminPageContex
       : html``;
 
   // 未対応1件ごとの解決アクションカード(textarea は独立行 — v0.11 §5 の規約)。
-  // PRG のアンカー #escalation-{id} でこのカードへ戻る
+  // 全アクションに confirm を付け、誤クリックでの解決を防ぐ(二重送信は confirm+PRG)
   const actionCard = (row: EscalationRow): Raw => {
     const answerForm =
       row.related_user_id === null
         ? html`<p class="form-help">
             対象メンバーが記録されていないエスカレーションのため、回答の送信はできません(裁定の記録または回答不要で解決してください)。
           </p>`
-        : html`<form method="post" action="${PATH}" class="form" style="margin-top:14px">
+        : !row.related_dm_ready
+          ? html`<p class="form-help">
+              対象メンバーの DM スペースが未登録のため回答を送信できません(本人が Chat アプリに一度話しかけると登録されます)。裁定の記録または回答不要で解決してください。
+            </p>`
+          : html`<form method="post" action="${PATH}" class="form" style="margin-top:14px"
+                onsubmit="return confirm('メンバーへ回答を送信し、このエスカレーションを解決しますか?')">
             ${csrfField(ctx)}
             <input type="hidden" name="action" value="answer">
             <input type="hidden" name="escalation_id" value="${row.escalation_id}">
-            <label class="field">メンバーへの回答(1000字以内)
-              <textarea name="text" required maxlength="1000" rows="5"
+            <label class="field">メンバーへの回答(${RESOLUTION_TEXT_MAX_LENGTH}字以内)
+              <textarea name="text" required maxlength="${RESOLUTION_TEXT_MAX_LENGTH}" rows="5"
                         placeholder="${row.related_user_name ?? ''} さんへ AI マネージャー経由で届く回答"></textarea>
             </label>
             <p class="form-help">回答は本人の DM へ届き、このエスカレーションは解決として記録されます</p>
             <button class="btn" type="submit">メンバーへ回答を送信して解決</button>
           </form>`;
-    const rulingForm = html`<form method="post" action="${PATH}" class="form" style="margin-top:14px">
+    const rulingForm = html`<form method="post" action="${PATH}" class="form" style="margin-top:14px"
+          onsubmit="return confirm('裁定を記録し、このエスカレーションを解決しますか?')">
       ${csrfField(ctx)}
       <input type="hidden" name="action" value="ruling">
       <input type="hidden" name="escalation_id" value="${row.escalation_id}">
-      <label class="field">AIマネージャーへのフィードバック=裁定(1000字以内)
-        <textarea name="text" required maxlength="1000" rows="5"
+      <label class="field">AIマネージャーへのフィードバック=裁定(${RESOLUTION_TEXT_MAX_LENGTH}字以内)
+        <textarea name="text" required maxlength="${RESOLUTION_TEXT_MAX_LENGTH}" rows="5"
                   placeholder="この状況での判断とその理由"></textarea>
       </label>
       <p class="form-help">判断基準ナレッジへ還流され、今後の回答に反映されます</p>
@@ -304,14 +335,15 @@ export async function handleAdminEscalationsPost(
   }
   const escalationId = requireNumericId(form, 'escalation_id', 'エスカレーション');
 
-  // 回答・裁定は本文必須(1000字以内 — v0.12 §3)。他アクションの text は送らない
+  // 回答・裁定は本文必須(上限は batch との契約定数 RESOLUTION_TEXT_MAX_LENGTH — v0.12 §3)。
+  // 他アクションの text は送らない
   let text: string | undefined;
   if (action === 'answer' || action === 'ruling') {
-    text = requireText(form, 'text', action === 'answer' ? '回答' : '裁定', 1000);
+    text = requireText(form, 'text', action === 'answer' ? '回答' : '裁定', RESOLUTION_TEXT_MAX_LENGTH);
   }
 
   // 対象の状態を SoT(ops.escalations)で検証する(hidden input 偽装・解決競合・
-  // 対象メンバーなしの回答送信に備える。batch 側でも防御する二段構え)
+  // 対象メンバーなし/DM 未登録への回答送信に備える。batch 側でも防御する二段構え)
   if (action === 'reflux') {
     const found = await query(
       pool,
@@ -326,9 +358,12 @@ export async function handleAdminEscalationsPost(
       );
     }
   } else {
-    const found = await query<{ related_user_id: string | null }>(
+    const found = await query<{ related_user_id: string | null; related_dm_ready: boolean }>(
       pool,
-      `SELECT related_user_id FROM ops.escalations WHERE escalation_id = $1 AND status = 'open'`,
+      `SELECT e.related_user_id, (u.chat_space_id IS NOT NULL) AS related_dm_ready
+       FROM ops.escalations e
+       LEFT JOIN ops.users u ON u.user_id = e.related_user_id
+       WHERE e.escalation_id = $1 AND e.status = 'open'`,
       [escalationId],
     );
     const row = found.rows[0];
@@ -340,6 +375,11 @@ export async function handleAdminEscalationsPost(
     if (action === 'answer' && row.related_user_id === null) {
       throw invalidInput(
         '対象メンバーが記録されていないため回答を送信できません(裁定の記録または回答不要で解決してください)',
+      );
+    }
+    if (action === 'answer' && !row.related_dm_ready) {
+      throw invalidInput(
+        '対象メンバーの DM スペースが未登録のため回答を送信できません(本人が Chat アプリに一度話しかけると登録されます)',
       );
     }
   }
@@ -363,7 +403,8 @@ export async function handleAdminEscalationsPost(
     redirectBase: PATH,
     successParam: ESCALATION_ACTIONS[action].successParam,
     errorParam: 'escalation_error',
-    // 操作したカード(未対応)/ 解決済み一覧へアンカーで戻る(v0.11 §5)
-    redirectAnchor: action === 'reflux' ? 'resolved' : `escalation-${escalationId}`,
+    // 解決系アクションの成功後はカード自体が消えるためアンカーは付けない
+    // (結果は sticky なフラッシュで見える)。還流再試行のみ解決済み一覧へ戻る
+    redirectAnchor: action === 'reflux' ? 'resolved' : undefined,
   });
 }
