@@ -21,6 +21,12 @@ export interface SearchOptions {
    * - undefined: 全域検索(v0.2 互換。例え話などの共通ナレッジ用)
    */
   scope?: KnowledgeScope | 'exclude-customer';
+  /**
+   * プロジェクトナレッジのスコープ(v0.12 §4)。
+   * 指定時: 共通ナレッジ+対象プロジェクトの固有ナレッジ(project_doc)を検索する。
+   * 未指定時: プロジェクト固有ナレッジを除外する(顧客スコープの既定と同じ誤混入防止)。
+   */
+  projectId?: string;
 }
 
 /**
@@ -42,6 +48,9 @@ export async function searchKnowledge(
   const scopeIndustryIds = scope !== undefined && scope !== 'exclude-customer' ? scope.industryIds : null;
   const excludeCustomer = scope === 'exclude-customer';
 
+  // プロジェクト固有ナレッジ(v0.12 §4): 対象プロジェクトが指定されればそのプロジェクトの
+  // チャンクのみ含め、未指定なら project_id IS NULL(共通・顧客・業界)に限定する
+  // ($7 が NULL のとき `project_id = $7` は真にならないため、条件式1つで両方を表せる)
   const result = await query<KnowledgeChunk & { score: string }>(
     pool,
     `SELECT doc_type, customer_id, title, chunk_text,
@@ -54,6 +63,7 @@ export async function searchKnowledge(
             OR (customer_id IS NULL AND industry_id IS NULL)
             OR customer_id = ANY($5::text[])
             OR (customer_id IS NULL AND industry_id = ANY($6::text[])))
+       AND (project_id IS NULL OR project_id = $7::text)
      ORDER BY embedding <=> $1::vector
      LIMIT $3`,
     [
@@ -63,6 +73,7 @@ export async function searchKnowledge(
       excludeCustomer,
       scopeCustomerIds,
       scopeIndustryIds ?? [],
+      options.projectId ?? null,
     ],
   );
   return result.rows.map((r) => ({ ...r, score: Number(r.score) }));

@@ -3,7 +3,9 @@ import {
   ADHOC_QA_INSTRUCTION,
   ADHOC_QA_RESPONSE_SCHEMA,
   classifyMessage,
+  COMPLETION_REVIEW_MAX_TURNS,
   detectTaskInstruction,
+  DIALOGUE_CLOSING_NOTE,
   EVENING_DIALOGUE_INSTRUCTION,
   EVENING_RESPONSE_SCHEMA,
   fetchProjectContextById,
@@ -14,6 +16,7 @@ import {
   logger,
   query,
   MORNING_DIALOGUE_INSTRUCTION,
+  MORNING_DIALOGUE_MAX_TURNS,
   MORNING_RESPONSE_SCHEMA,
   SYSTEM_PROMPT,
   TASK_COMPLETION_MATCH_INSTRUCTION,
@@ -38,6 +41,7 @@ import { messageText } from '../chat-event.js';
 import {
   appendTurns,
   createDialogue,
+  fetchRecentTurns,
   findMorningDialogue,
   findOpenDialogue,
   nowTurn,
@@ -120,6 +124,34 @@ function turnsToMessages(turns: DialogueTurn[], latestUserText: string): ChatTur
   return [...history, { role: 'user', text: latestUserText }];
 }
 
+/**
+ * ターン数上限つき対話(朝・夕)の「最後の往復」判定(v0.12 §2)。
+ * 今回の返信で user/ai の2ターンが追記されると上限に達する場合、
+ * これ以上の問い返しをさせない締めの指示(DIALOGUE_CLOSING_NOTE)を注入する。
+ */
+function closingNoteFor(dialogue: DialogueRow, maxTurns: number): string {
+  return dialogue.turns.length + 2 >= maxTurns ? `\n\n${DIALOGUE_CLOSING_NOTE}` : '';
+}
+
+/**
+ * 同一ロールが連続するメッセージを1つに結合する(v0.12 §5)。
+ * 単一対話内のターンは user/ai が交互だが、複数対話を平坦化した会話履歴では
+ * 対話の境界で同一ロールが連続し得る(例: 前の対話の末尾が user・次の対話の先頭も user)。
+ * Vertex のマルチターン規約(交互推奨)に合わせて安全側に倒す。
+ */
+function mergeConsecutiveTurns(turns: ChatTurn[]): ChatTurn[] {
+  const merged: ChatTurn[] = [];
+  for (const turn of turns) {
+    const last = merged[merged.length - 1];
+    if (last !== undefined && last.role === turn.role) {
+      merged[merged.length - 1] = { role: last.role, text: `${last.text}\n${turn.text}` };
+    } else {
+      merged.push(turn);
+    }
+  }
+  return merged;
+}
+
 interface MorningLlmResponse {
   reply: string;
   hypothesis_complete: boolean;
@@ -164,7 +196,7 @@ async function continueMorningDialogue(
   try {
     ({ value, result } = await generateJson<MorningLlmResponse>({
       tier: 'pro',
-      system: `${SYSTEM_PROMPT}\n\n${MORNING_DIALOGUE_INSTRUCTION}\n\n## 本人のタスク状況\n${tasks}${projectBlock}`,
+      system: `${SYSTEM_PROMPT}\n\n${MORNING_DIALOGUE_INSTRUCTION}\n\n## 本人のタスク状況\n${tasks}${projectBlock}${closingNoteFor(dialogue, MORNING_DIALOGUE_MAX_TURNS)}`,
       messages: turnsToMessages(dialogue.turns, text),
       responseSchema: MORNING_RESPONSE_SCHEMA as unknown as Record<string, unknown>,
     }));
@@ -289,7 +321,7 @@ async function continueEveningDialogue(
   try {
     ({ value, result } = await generateJson<EveningLlmResponse>({
       tier: 'pro',
-      system: `${SYSTEM_PROMPT}\n\n${EVENING_DIALOGUE_INSTRUCTION}\n\n## 今朝の仮説\n${hypothesisContext}`,
+      system: `${SYSTEM_PROMPT}\n\n${EVENING_DIALOGUE_INSTRUCTION}\n\n## 今朝の仮説\n${hypothesisContext}${closingNoteFor(dialogue, COMPLETION_REVIEW_MAX_TURNS)}`,
       messages: turnsToMessages(dialogue.turns, text),
       responseSchema: EVENING_RESPONSE_SCHEMA as unknown as Record<string, unknown>,
     }));
@@ -457,12 +489,16 @@ async function answerAdhocQuestion(
 
   // 顧客マスタ情報(v0.7 §3): 対象顧客の業界・顧客間関係を SoT(ops マスタ)から
   // 直接取得してプロンプトに供給する(取得失敗は非ブロッキングで undefined)。
-  // ナレッジ検索(embedding 依存)の失敗も QA を止めず、参考情報なしで継続する(v0.9 §5)
-  const [chunks, analogies, customerContext, projectContext] = await Promise.all([
+  // ナレッジ検索(embedding 依存)の失敗も QA を止めず、参考情報なしで継続する(v0.9 §5)。
+  // 会話履歴(v0.12 §5): 直近の対話ターンを供給し、「さっきの件」のような
+  // 直前のやり取りへの言及を解決できるようにする(内部で非ブロッキング — 失敗時は空)
+  const [chunks, analogies, customerContext, projectContext, recentTurns] = await Promise.all([
     searchKnowledge(pool, text, {
-      docTypes: ['customer_profile', 'glossary', 'domain_ops', 'decision_rules'],
+      docTypes: ['customer_profile', 'glossary', 'domain_ops', 'decision_rules', 'project_doc'],
       limit: 5,
       scope,
+      // プロジェクト固有ナレッジ(v0.12 §4): 対象プロジェクトが特定できた場合のみ検索対象に含める
+      ...(targetProjectId === undefined ? {} : { projectId: targetProjectId }),
     }).catch((err: unknown) => {
       logger.error('ナレッジ検索に失敗しました(参考情報なしで継続)', err);
       return [];
@@ -480,6 +516,7 @@ async function answerAdhocQuestion(
     targetProjectId !== undefined
       ? fetchProjectContextById(pool, targetProjectId)
       : Promise.resolve(undefined),
+    fetchRecentTurns(pool, user.user_id, MAX_CONTEXT_TURNS),
   ]);
 
   const customerContextBlock =
@@ -494,7 +531,7 @@ async function answerAdhocQuestion(
   const { value, result } = await generateJson<QaLlmResponse>({
     tier,
     system: `${SYSTEM_PROMPT}\n\n${ADHOC_QA_INSTRUCTION}${customerContextBlock}${projectContextBlock}\n\n## 参考情報\n${formatKnowledgeContext(chunks)}${analogyBlock}`,
-    messages: [{ role: 'user', text }],
+    messages: mergeConsecutiveTurns(turnsToMessages(recentTurns, text)),
     responseSchema: ADHOC_QA_RESPONSE_SCHEMA as unknown as Record<string, unknown>,
   });
 

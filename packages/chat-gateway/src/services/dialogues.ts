@@ -1,4 +1,12 @@
-import { ADHOC_CHECKIN_MAX_TURNS, AppError, ERROR_CODES, query } from '@ai-manager/shared';
+import {
+  ADHOC_CHECKIN_MAX_TURNS,
+  AppError,
+  COMPLETION_REVIEW_MAX_TURNS,
+  ERROR_CODES,
+  MORNING_DIALOGUE_MAX_TURNS,
+  logger,
+  query,
+} from '@ai-manager/shared';
 import type pg from 'pg';
 import { formatOpenTasks, listOpenTasks } from './tasks.js';
 
@@ -31,6 +39,11 @@ const DIALOGUE_COLUMNS =
  * ターン数上限(ADHOC_CHECKIN_MAX_TURNS = 初回問いかけ+3往復)未満の間だけ
  * 「返信待ち」として扱う(プロンプト側が2〜3往復での自然な締めを指示し、
  * 上限は無関係なメッセージを取り込み続けないための保険)。
+ *
+ * 朝・夕にもターン数上限を適用する(v0.12 §2): 仮説・振り返りが確定しないまま
+ * 問い返しが延々と続かないよう、上限に達した対話は未確定でも「返信待ち」から外す
+ * (以後のメッセージは通常のルーティング — QA 等 — で処理される)。
+ * 上限直前の往復ではプロンプトに締めの指示が注入され、AI が補って確定・クローズする。
  */
 export async function findOpenDialogue(
   pool: pg.Pool,
@@ -44,8 +57,10 @@ export async function findOpenDialogue(
      WHERE user_id = $1
        AND created_at >= ($2::date::timestamp AT TIME ZONE 'Asia/Tokyo')
        AND created_at <  (($2::date + 1)::timestamp AT TIME ZONE 'Asia/Tokyo')
-       AND ((dialogue_type = 'morning_checkin' AND hypothesis IS NULL)
-         OR (dialogue_type = 'completion_review' AND review IS NULL)
+       AND ((dialogue_type = 'morning_checkin' AND hypothesis IS NULL
+             AND jsonb_array_length(turns) < ${MORNING_DIALOGUE_MAX_TURNS})
+         OR (dialogue_type = 'completion_review' AND review IS NULL
+             AND jsonb_array_length(turns) < ${COMPLETION_REVIEW_MAX_TURNS})
          OR (dialogue_type = 'adhoc_checkin' AND jsonb_array_length(turns) < ${ADHOC_CHECKIN_MAX_TURNS}))
      ORDER BY created_at DESC
      LIMIT 1`,
@@ -180,6 +195,46 @@ export async function appendTurns(
 
 export function nowTurn(role: 'ai' | 'user', content: string): DialogueTurn {
   return { role, content, ts: new Date().toISOString() };
+}
+
+/** 会話履歴として遡る時間幅(v0.12 §5)。当日の文脈の継続が目的のため 24 時間とする。 */
+const RECENT_TURNS_LOOKBACK_HOURS = 24;
+
+/** 会話履歴として遡る対話数の上限(1件の対話が複数ターンを含むため小さくてよい)。 */
+const RECENT_DIALOGUES_LIMIT = 5;
+
+/**
+ * 随時 QA の会話履歴(v0.12 §5): 本人の直近の対話ターンを時系列で返す。
+ * 「ひとつ前の対話」への言及(さっきの件・その顧客 等)を AI が解決できるよう、
+ * 直近 ${RECENT_TURNS_LOOKBACK_HOURS} 時間の対話(種別不問)を新しい順に
+ * ${RECENT_DIALOGUES_LIMIT} 件まで集め、ターンを時系列に平坦化して末尾 maxTurns 件を返す。
+ * 補助文脈のため非ブロッキング(開発原則 4): 取得失敗時は空配列で継続する。
+ */
+export async function fetchRecentTurns(
+  pool: pg.Pool,
+  userId: string,
+  maxTurns: number,
+): Promise<DialogueTurn[]> {
+  try {
+    const result = await query<{ turns: DialogueTurn[] }>(
+      pool,
+      `SELECT turns
+       FROM ops.dialogues
+       WHERE user_id = $1
+         AND created_at > now() - INTERVAL '${RECENT_TURNS_LOOKBACK_HOURS} hours'
+       ORDER BY created_at DESC
+       LIMIT ${RECENT_DIALOGUES_LIMIT}`,
+      [userId],
+    );
+    // 新しい順で取得した対話を古い順に並べ直し、ターンを平坦化して末尾のみ残す
+    const flattened = result.rows
+      .reverse()
+      .flatMap((r) => (Array.isArray(r.turns) ? r.turns : []));
+    return flattened.slice(-maxTurns);
+  } catch (err) {
+    logger.error('会話履歴の取得に失敗しました(履歴なしで継続)', err, { userId });
+    return [];
+  }
 }
 
 /**

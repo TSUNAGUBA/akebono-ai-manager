@@ -14,6 +14,13 @@ vi.mock('@ai-manager/shared', async (importOriginal) => {
   return { ...mod, sendChatMessage: mocks.sendChatMessage, embedTexts: mocks.embedTexts };
 });
 
+// 裁定の還流は shared/escalations.ts に共通化された(v0.12)。shared 内部の
+// `./vertex.js` 直接 import も同じ embedTexts モックを通す
+vi.mock('../../shared/src/vertex.js', async (importOriginal) => {
+  const mod = await importOriginal<typeof import('../../shared/src/vertex.js')>();
+  return { ...mod, embedTexts: mocks.embedTexts };
+});
+
 beforeEach(() => {
   mocks.sendChatMessage.mockClear();
   mocks.sendChatMessage.mockResolvedValue({});

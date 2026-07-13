@@ -8,9 +8,16 @@
 --   - fact_workload はスナップショットを UPSERT
 --   - ディメンションは SCD Type 2(変更検知→現行行クローズ+新行追加)
 
+-- SECURITY DEFINER(v0.12): ダッシュボードの「集計を今すぐ実行」→ batch(ai_manager_app_rw)
+-- からも実行できるようにする。app_rw へ dwh 表の直接書込権限は与えず、この関数の実行のみを
+-- 許可する(最小権限)。定義者(マイグレーション実行ユーザー)はパーティション作成を含む
+-- 全操作の権限を持ち、pg_cron からの定時実行は従来どおり動作する。
+-- 本文の参照はすべてスキーマ修飾済みのため search_path は最小に固定する(乗っ取り防止)。
 CREATE OR REPLACE FUNCTION dwh.run_daily_etl(p_target_date DATE DEFAULT NULL)
 RETURNS void
 LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
   v_target       DATE;
@@ -259,3 +266,7 @@ BEGIN
   WHERE (e.created_at AT TIME ZONE 'Asia/Tokyo')::date BETWEEN v_lookback AND v_target;
 END;
 $$;
+
+-- SECURITY DEFINER 関数の実行権限は既定(PUBLIC)から剥奪し、必要なロールにのみ付与する
+-- (付与は 30_grants.sql — ロールが存在する環境でのみ付与)。
+REVOKE EXECUTE ON FUNCTION dwh.run_daily_etl(DATE) FROM PUBLIC;

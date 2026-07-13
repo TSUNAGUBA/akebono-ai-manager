@@ -69,7 +69,8 @@ SELECT 'ai_manager_admin_rw' AS role_name,
 -- 期待値: 全行で can_select = f / can_insert = f / can_update = f / can_delete = f
 -- (ops.users は表レベルの権限を付与しない。ユーザー設定ページ v0.8 用の権限は
 --  列単位のみで、セクション5で別途検証する。ops.tasks は v0.10 で SELECT+status 列の
---  UPDATE のみ付与されたため、セクション6で別途検証する。認証時のロール解決は
+--  UPDATE のみ付与されたため、セクション6で別途検証する。ops.dialogues は v0.12 で
+--  SELECT のみ付与されたため、セクション7で別途検証する。認証時のロール解決は
 --  ai_manager_dashboard_ro 側のプールで行う)
 SELECT 'ai_manager_admin_rw' AS role_name,
        t.tbl AS table_name,
@@ -79,7 +80,6 @@ SELECT 'ai_manager_admin_rw' AS role_name,
        has_table_privilege('ai_manager_admin_rw', t.tbl, 'DELETE') AS can_delete
 FROM (VALUES
         ('ops.users'),
-        ('ops.dialogues'),
         ('ops.escalations')
      ) AS t(tbl)
 ORDER BY t.tbl;
@@ -110,3 +110,28 @@ SELECT 'ai_manager_admin_rw' AS role_name,
        has_table_privilege('ai_manager_admin_rw', 'ops.task_status_log', 'INSERT') AS log_insert,
        has_table_privilege('ai_manager_admin_rw', 'ops.task_status_log', 'UPDATE') AS log_update,
        has_table_privilege('ai_manager_admin_rw', 'ops.task_status_log', 'DELETE') AS log_delete;
+
+-- ── 7. 対話ログ確認ページ(v0.12 §7)の権限境界 ──
+-- 期待値:
+--   admin_rw:      dialogues / dialogue_feedback とも SELECT = t、書込は全て f
+--                  (フィードバックの記録・訂正送信は batch = ai_manager_app_rw の責務)
+--   dashboard_ro:  dialogues / dialogue_feedback とも SELECT = f
+--                  (「閲覧ロールは生の対話ログを読めない」要件 7.5 の境界を維持)
+SELECT r.role_name,
+       t.tbl AS table_name,
+       has_table_privilege(r.role_name, t.tbl, 'SELECT') AS can_select,
+       has_table_privilege(r.role_name, t.tbl, 'INSERT') AS can_insert,
+       has_table_privilege(r.role_name, t.tbl, 'UPDATE') AS can_update,
+       has_table_privilege(r.role_name, t.tbl, 'DELETE') AS can_delete
+FROM (VALUES ('ai_manager_admin_rw'), ('ai_manager_dashboard_ro')) AS r(role_name)
+CROSS JOIN (VALUES ('ops.dialogues'), ('ops.dialogue_feedback')) AS t(tbl)
+ORDER BY r.role_name, t.tbl;
+
+-- ── 8. 集計 ETL の手動実行(v0.12 §6)は app_rw のみ実行可 ──
+-- 期待値: app_rw = t / dashboard_ro = f / admin_rw = f
+-- (SECURITY DEFINER 関数のため PUBLIC からは REVOKE 済み — 20_daily_etl.sql)
+SELECT r.role_name,
+       'dwh.run_daily_etl(date)' AS target,
+       has_function_privilege(r.role_name, 'dwh.run_daily_etl(date)', 'EXECUTE') AS can_execute
+FROM (VALUES ('ai_manager_app_rw'), ('ai_manager_dashboard_ro'), ('ai_manager_admin_rw')) AS r(role_name)
+ORDER BY r.role_name;

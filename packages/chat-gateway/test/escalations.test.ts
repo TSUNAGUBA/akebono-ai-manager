@@ -17,6 +17,14 @@ vi.mock('@ai-manager/shared', async (importOriginal) => {
   return { ...mod, sendChatMessage: mocks.sendChatMessage, embedTexts: mocks.embedTexts };
 });
 
+// 裁定の保存・還流は shared/escalations.ts に共通化された(v0.12)。
+// shared 内部の `./vertex.js` 直接 import は上の '@ai-manager/shared' モックを通らないため、
+// vertex モジュール自体も差し替える(同一の embedTexts モックを共有する)
+vi.mock('../../shared/src/vertex.js', async (importOriginal) => {
+  const mod = await importOriginal<typeof import('../../shared/src/vertex.js')>();
+  return { ...mod, embedTexts: mocks.embedTexts };
+});
+
 beforeEach(() => {
   mocks.sendChatMessage.mockClear();
   mocks.sendChatMessage.mockResolvedValue({});
@@ -73,10 +81,12 @@ describe('recordResolution + refluxResolutionToKnowledge(SQL 整合)', () => {
     context: '質問: 在庫僅少時の優先順位',
     status: 'resolved',
     resolution: '出荷優先で裁定する',
+    resolution_type: 'ruling',
+    related_user_id: null,
     knowledge_reflected: false,
   };
 
-  it('裁定の保存は open のみ対象(裁定済みを上書きしない)', async () => {
+  it('裁定の保存は open のみ対象(裁定済みを上書きしない)。既定の種別は ruling', async () => {
     const { pool, calls } = createMockPool((text) => {
       if (text.includes('SET resolution = $3')) return { rows: [resolvedRow] };
       return undefined;
@@ -85,7 +95,20 @@ describe('recordResolution + refluxResolutionToKnowledge(SQL 整合)', () => {
     expect(row?.resolution).toBe('出荷優先で裁定する');
     const update = findCall(calls, 'SET resolution = $3');
     expect(update?.text).toContain(`status = 'open'`);
-    expect(update?.params).toEqual(['5', 'admin1', '出荷優先で裁定する']);
+    expect(update?.params).toEqual(['5', 'admin1', '出荷優先で裁定する', 'ruling']);
+  });
+
+  it('解決の種別を指定して保存できる(v0.12: ダッシュボードの解決アクション)', async () => {
+    const { pool, calls } = createMockPool((text) => {
+      if (text.includes('SET resolution = $3')) {
+        return { rows: [{ ...resolvedRow, resolution_type: 'no_action' }] };
+      }
+      return undefined;
+    });
+    const row = await recordResolution(pool, '5', 'admin1', '回答不要', 'no_action');
+    expect(row?.resolution_type).toBe('no_action');
+    const update = findCall(calls, 'SET resolution = $3');
+    expect(update?.params).toEqual(['5', 'admin1', '回答不要', 'no_action']);
   });
 
   it('裁定ゲートの単一化: 保存成功時に同一管理者の他の open な受付状態をクリアする', async () => {

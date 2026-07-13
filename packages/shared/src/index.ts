@@ -12,3 +12,4 @@ export * from './chat-cards.js';
 export * from './routing.js';
 export * from './prompts.js';
 export * from './project-context.js';
+export * from './escalations.js';

@@ -22,6 +22,7 @@
 | v0.11 ナレッジ同期の診断性・PDF・規約撤廃・フォーム改善 | **実装済み** | Drive ショートカットの実体解決(共有を引き継がない制約は UI 警告+同期ログで可視化。未解決時はチャンク掃除をスキップ — 原則2)、ナレッジ管理ページに同期対象フォルダへの導線。PDF 投入(バイナリのまま Drive 保存・3MB)+同期時のローカルテキスト抽出(unpdf — ADR-17。テキスト層なしはスキップ+警告)。ファイル名の文字種制限を撤廃(日本語名可・失敗名の受け渡しを JSON 化)。管理 UI の textarea 独立行化・date/file 入力のスタイル統一・PRG リダイレクトのセクションアンカー+sticky バナー |
 | v0.9 プロジェクト管理 UI・優先順改訂・エイリアス・耐障害性 | **実装済み** | プロジェクトの管理者限定 CRUD(/admin/projects。物理削除なし・状態 closed 運用)。明示的タスク指示を進行中対話より優先(ADR-15)。顧客エイリアス照合(migration 0008。設計 SoT は phase3-and-migration-design.md §2)+low エスカレーションへの対象顧客診断情報。対話継続の LLM 失敗時に返信ターンを保存して定型文フォールバック、QA 補助処理(スコープ導出・ナレッジ検索)の非ブロッキング化、汎用エラー文言への AIM コード付与 |
 | v0.8 問いかけ対象のユーザー単位設定 | **実装済み** | ops.users.checkin_enabled(migration 0007。既存行は member=可 / admin=不可で初期化 — 従来動作の保存)。morning/adhoc-checkin の対象クエリと状況確認画面をロール固定からフラグへ変更。管理者限定 /admin/users で可否を切替(監査ログ・CSRF)。ai_manager_admin_rw へ ops.users の列単位 GRANT(ADR-14) |
+| v0.12 対話の終了制御・エスカレーション解決導線・プロジェクトナレッジ・会話履歴参照・ジョブ手動実行・対話フィードバック | **実装済み** | 朝・夕対話のターン数上限(11/10)+上限直前の締め指示注入(質問ループの終了制御)。管理者限定 /admin/escalations(回答送信/裁定/回答不要/再還流 — 実行主体は batch の escalation-action ジョブ、ADR-18)。Drive 規約 project/{ID}/ → doc_type=project_doc のプロジェクトナレッジ(migration 0010。QA は対象プロジェクト特定時のみ検索対象に含める)。随時 QA へ直近 24h・末尾 12 ターンの会話履歴を供給。管理者限定 /admin/jobs から全定時ジョブ+日次 ETL の手動実行(dwh.run_daily_etl を SECURITY DEFINER 化し app_rw へ実行権限のみ付与 — ADR-19)。管理者限定 /admin/dialogues で対話ログ確認+フィードバック → AI が謝罪+訂正 DM を送信し decision_rules へ還流(dialogue-feedback ジョブ、ADR-20) |
 | v0.5 管理者発火の状況確認 | **実装済み** | 管理者限定 /admin/checkin(active メンバー一覧+当日の朝/状況確認の応答状況、個別・全員への送信)。配信は batch の adhoc-checkin ジョブ(OIDC 起動・1日1回ガードなし。DM 未登録と、朝の問いかけ/振り返りに応答中のメンバーはスキップ — 対話の横取り防止、v0.5 §2-5)。文面は flash-lite 生成+定型文フォールバックで、冒頭に管理者発火を明示。返信は adhoc_checkin 対話として ops.dialogues に保存され、仮説形成を要求しない軽量な継続で2〜3往復の自然クローズ(migration 0006 で dialogue_type と dwh.dim_dialogue_type を拡張) |
 
 ## 2. 段階運用の切り分け(フラグ一覧)
@@ -154,11 +155,61 @@
   ある。ナレッジ用途(意味検索のチャンク)では許容し、精度が問題になった文書は
   .md への書き起こしを推奨する
 
+### ADR-18: エスカレーション解決アクションの実行主体は batch(dashboard は起動のみ)
+
+- **決定**: /admin/escalations の解決アクション(回答送信・裁定・回答不要・再還流)は、
+  dashboard から OIDC で起動する batch ジョブ `escalation-action` が実行する。
+  dashboard には ops.escalations の書込権限・Chat 送信権限を付与しない。
+  解決の種別は `ops.escalations.resolution_type`(ruling / admin_message / no_action)で区別し、
+  既存の解決済み行は 'ruling' へバックフィルする(migration 0010)
+- **理由**: v0.5 §2 の権限境界の原則(配信の実行主体は batch)を踏襲する。裁定の保存・
+  ナレッジ還流は Chat の M6 フローと共通ロジック(shared/escalations.ts へ移動)を使い、
+  経路によらず同じ SoT → キャッシュ順序を保証する(原則3・6)
+- **整合の担保**: 「メンバーへ回答送信」は adhoc-checkin と同じ「対話レコード作成(SoT)→
+  DM 送信 → 失敗時は補償削除」のパターンで、送信できなければエスカレーションを open のまま残す
+  (解決済みなのに未回答という不整合を作らない)。解決は open のみ更新(既存裁定を上書きしない)
+- **トレードオフ**: ダッシュボードの操作が batch の可用性に依存する(既存の「今すぐ同期」
+  「状況確認」と同じ依存。エラーコード AIM-6009 で診断可能)
+
+### ADR-19: 日次 ETL の手動実行は SECURITY DEFINER 関数の実行権限で許可する
+
+- **決定**: `dwh.run_daily_etl` を SECURITY DEFINER(search_path 固定)化し、PUBLIC から
+  EXECUTE を剥奪した上で ai_manager_app_rw にのみ付与する。batch の新ジョブ `daily-etl` が
+  `SELECT dwh.run_daily_etl($1)` を実行し、/admin/jobs から起動できる。手動実行の既定対象日は
+  当日(定時実行の既定は前日のまま)
+- **理由**: app_rw へ dwh 表の直接書込+ops/dwh スキーマの CREATE(パーティション作成)を
+  付与するより、確定した ETL 一式の実行だけを許可する方が最小権限に適う。関数本文は全参照が
+  スキーマ修飾済みで、search_path 乗っ取りの余地がない
+- **冪等性**: 対象日のファクトは DELETE→INSERT の洗い替え・fact_workload は UPSERT のため、
+  手動実行を何度押しても、また翌日の pg_cron 定時実行と重なっても、集計は巻き戻らない(原則2)
+- **トレードオフ**: SECURITY DEFINER は定義者(マイグレーション実行ユーザー)権限で走るため、
+  関数の変更レビューでは本文の全参照がスキーマ修飾されていることを確認し続ける必要がある
+
+### ADR-20: 対話フィードバックは decision_rules へ還流し、生ログ閲覧は admin_rw の列外権限で許可する
+
+- **決定**: 管理者フィードバック(v0.12 §7)の SoT は `ops.dialogue_feedback`。
+  rag へは `doc_id='feedback/{id}'`・`doc_type='decision_rules'` で還流する(新しい doc_type を
+  作らない — 裁定と同じ「判断知識」として検索されることが目的で、QA の検索対象 docTypes を
+  変えずに以後の回答へ反映される)。knowledge-sync の掃除は feedback/% を保護する。
+  訂正メッセージは dialogue_type='feedback_correction' で対話ログに記録され、
+  会話履歴供給(v0.12 §5)を通じて以後の QA 文脈にも入る。
+  /admin/dialogues の生ログ閲覧は ai_manager_dashboard_ro には付与せず(要件 7.5 の境界を維持)、
+  管理者限定ページ専用の ai_manager_admin_rw に SELECT のみ付与する(アプリ層の管理者判定との二重制御)
+- **理由**: ①フィードバックの語彙は裁定と同じ「状況→正しい判断」であり、doc_type を増やすと
+  QA・スコープ導出・掃除処理の分岐が増えるだけで検索品質に寄与しない ②生ログは これまで通り
+  閲覧ロールから遮断し、管理者の観察補助(要件 3.1)に必要な最小の経路のみ開ける
+- **回復経路**: 訂正 DM の送信失敗時はフィードバックが pending のまま残り、画面の「再送」で
+  同一 feedback_id から再配信できる(還流も未了なら再試行される)。delivered の再送は拒否
+  (二重配信防止・冪等)
+- **トレードオフ**: フィードバックが増えると decision_rules の検索空間に混ざる(件数が問題に
+  なった時点で doc_type 分離を再検討)。訂正の本人確認(既読)は追わない(送達まで)
+
 ## 4. セキュリティ境界の追加
 
 | 経路 | 保護 |
 |---|---|
-| ブラウザ → dashboard /admin/* | 既存の IAP+role=admin 判定に加え、専用 DB ロール(ai_manager_admin_rw: マスタ4表+顧客の書込可。v0.4 で rag.knowledge_chunks の SELECT、v0.8 で ops.users の列単位権限 — 表示列の SELECT+checkin_enabled のみの UPDATE、v0.9 で ops.projects の SELECT/INSERT/UPDATE と ops.customer_aliases の SELECT/INSERT/DELETE、v0.10 で ops.project_milestones の CRUD と ops.tasks の SELECT+status/updated_at/completed_at 列のみの UPDATE+task_status_log の SELECT/INSERT — を追加)、CSRF(__Host- クッキー+SameSite=Strict)、全書込の監査ログ。権限の実機検証は scripts/setup/verify-grants.sql |
+| ブラウザ → dashboard /admin/* | 既存の IAP+role=admin 判定に加え、専用 DB ロール(ai_manager_admin_rw: マスタ4表+顧客の書込可。v0.4 で rag.knowledge_chunks の SELECT、v0.8 で ops.users の列単位権限 — 表示列の SELECT+checkin_enabled のみの UPDATE、v0.9 で ops.projects の SELECT/INSERT/UPDATE と ops.customer_aliases の SELECT/INSERT/DELETE、v0.10 で ops.project_milestones の CRUD と ops.tasks の SELECT+status/updated_at/completed_at 列のみの UPDATE+task_status_log の SELECT/INSERT、v0.12 で ops.dialogues / ops.dialogue_feedback の SELECT(生ログは閲覧ロールに付与しない — ADR-20)— を追加)、CSRF(__Host- クッキー+SameSite=Strict)、全書込の監査ログ。権限の実機検証は scripts/setup/verify-grants.sql |
+| dashboard → batch(エスカレーション解決・対話フィードバック・ジョブ手動実行) | 「今すぐ同期」と同じ OIDC ID トークン+Cloud Run IAM+BATCH_INVOKER_SA 照合。加えて batch 側で操作者(operatorUserId)が active な管理者であることを ops.users で検証(多層防御 — ADR-18) |
 | dashboard → Drive(ナレッジ投入・削除) | ランタイム SA 自身のトークン(scope: drive。DWD 不使用)。SA が書込めるのは「編集者」で共有されたフォルダのみで、実効権限境界は Drive の共有 ACL(v0.4 §2)。削除はゴミ箱移動(復元可能) |
 | dashboard → batch(今すぐ同期) | OIDC ID トークン(audience=batch URL)+Cloud Run IAM(roles/run.invoker)+batch アプリ層の BATCH_INVOKER_SA 照合の多層防御 |
 | batch → 本人カレンダー | ドメイン全体委任(calendar.readonly のみ)。SA キー不発行(IAM signJwt)。委任スコープは Workspace 管理者が制御 |
@@ -171,3 +222,5 @@
 - 顧客マスタの無効化(v0.3 §5)は未対応 — ops.customers に active 列がないため。必要時にスキーマ追加を判断
 - タスクの UI 管理は v0.10 でプロジェクト編集ページの「一覧+状態更新」まで実装(ADR-16)。起票・題名・担当・期限の変更は引き続き Chat の動線(M3)が SoT
 - 例え話ライブラリの拡充・裁定の Drive 原本反映は運用タスク
+- プロジェクトナレッジ(v0.12)の RAG 供給は随時 QA のみ(朝夕対話へは v0.10 の計画情報供給が担う)。対話フィードバックの件数が増えて decision_rules の検索空間を圧迫した場合は doc_type 分離を再検討(ADR-20)
+- ターン数上限(v0.12)は定数(朝 11/夕 10)。運用で不足が確認された時点で環境変数化を検討

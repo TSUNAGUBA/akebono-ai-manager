@@ -57,6 +57,10 @@ export const ERROR_CODES = {
   DRIVE_SYNC_FAILED: 'AIM-5003',
   /** レポート生成に失敗 */
   REPORT_GENERATION_FAILED: 'AIM-5004',
+  /** ジョブのリクエストパラメータが不正(対象が存在しない・必須欠落等) */
+  JOB_PARAMS_INVALID: 'AIM-5005',
+  /** 集計 ETL(dwh.run_daily_etl)の実行に失敗 */
+  ETL_FAILED: 'AIM-5006',
 
   /** ダッシュボードのクエリに失敗 */
   DASHBOARD_QUERY_FAILED: 'AIM-6001',
@@ -74,6 +78,12 @@ export const ERROR_CODES = {
   SYNC_TRIGGER_FAILED: 'AIM-6007',
   /** 状況確認ジョブ(adhoc-checkin)の起動に失敗 */
   CHECKIN_TRIGGER_FAILED: 'AIM-6008',
+  /** エスカレーション解決アクション(escalation-action)の起動に失敗 */
+  ESCALATION_ACTION_TRIGGER_FAILED: 'AIM-6009',
+  /** 対話フィードバック(dialogue-feedback)の起動に失敗 */
+  FEEDBACK_TRIGGER_FAILED: 'AIM-6010',
+  /** ジョブ実行ページからの定時ジョブ手動起動に失敗 */
+  JOB_TRIGGER_FAILED: 'AIM-6011',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];
