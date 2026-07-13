@@ -2,12 +2,15 @@ import {
   ADHOC_CHECKIN_DIALOGUE_INSTRUCTION,
   ADHOC_QA_INSTRUCTION,
   ADHOC_QA_RESPONSE_SCHEMA,
+  calendarEnabled,
   classifyMessage,
   COMPLETION_REVIEW_MAX_TURNS,
+  detectScheduleQuestion,
   detectTaskInstruction,
   DIALOGUE_CLOSING_NOTE,
   EVENING_DIALOGUE_INSTRUCTION,
   EVENING_RESPONSE_SCHEMA,
+  fetchEventsText,
   fetchProjectContextById,
   fetchProjectContextForUser,
   generateContent,
@@ -491,42 +494,57 @@ async function answerAdhocQuestion(
     scope = scopeFallbackMode() === 'all' ? undefined : ('exclude-customer' as const);
   }
 
+  // 予定質問の検知(v0.14 §2): ルールベースで対象日(明後日 → 明日 → 当日の優先順)を
+  // 解決する(構造の判定を LLM にさせない — v0.3 設計原則2)
+  const scheduleDateJst = detectScheduleQuestion(text);
+
   // 顧客マスタ情報(v0.7 §3): 対象顧客の業界・顧客間関係を SoT(ops マスタ)から
   // 直接取得してプロンプトに供給する(取得失敗は非ブロッキングで undefined)。
   // ナレッジ検索(embedding 依存)の失敗も QA を止めず、参考情報なしで継続する(v0.9 §5)。
   // 会話履歴(v0.12 §5): 直近の対話ターンを供給し、「さっきの件」のような
   // 直前のやり取りへの言及を解決できるようにする(内部で非ブロッキング — 失敗時は空)
-  const [chunks, analogies, customerContext, projectContext, recentTurns] = await Promise.all([
-    searchKnowledge(pool, text, {
-      docTypes: ['customer_profile', 'glossary', 'domain_ops', 'decision_rules', 'project_doc'],
-      limit: 5,
-      scope,
-      // プロジェクト固有ナレッジ(v0.12 §4): 対象プロジェクトが特定できた場合のみ検索対象に含める
-      ...(targetProjectId === undefined ? {} : { projectId: targetProjectId }),
-    }).catch((err: unknown) => {
-      logger.error('ナレッジ検索に失敗しました(参考情報なしで継続)', err);
-      return [];
-    }),
-    /例え|たとえ/.test(text)
-      ? searchAnalogies(pool, text).catch((err: unknown) => {
-          logger.error('例え話の検索に失敗しました(few-shot なしで継続)', err);
-          return [];
-        })
-      : Promise.resolve([]),
-    targetCustomerId !== undefined
-      ? fetchCustomerContext(pool, targetCustomerId)
-      : Promise.resolve(undefined),
-    // プロジェクトの計画情報(v0.10 §4.2。内部で非ブロッキング)
-    targetProjectId !== undefined
-      ? fetchProjectContextById(pool, targetProjectId)
-      : Promise.resolve(undefined),
-    fetchRecentTurns(pool, user.user_id, MAX_CONTEXT_TURNS),
-  ]);
+  const [chunks, analogies, customerContext, projectContext, recentTurns, calendarText] =
+    await Promise.all([
+      searchKnowledge(pool, text, {
+        docTypes: ['customer_profile', 'glossary', 'domain_ops', 'decision_rules', 'project_doc'],
+        limit: 5,
+        scope,
+        // プロジェクト固有ナレッジ(v0.12 §4): 対象プロジェクトが特定できた場合のみ検索対象に含める
+        ...(targetProjectId === undefined ? {} : { projectId: targetProjectId }),
+      }).catch((err: unknown) => {
+        logger.error('ナレッジ検索に失敗しました(参考情報なしで継続)', err);
+        return [];
+      }),
+      /例え|たとえ/.test(text)
+        ? searchAnalogies(pool, text).catch((err: unknown) => {
+            logger.error('例え話の検索に失敗しました(few-shot なしで継続)', err);
+            return [];
+          })
+        : Promise.resolve([]),
+      targetCustomerId !== undefined
+        ? fetchCustomerContext(pool, targetCustomerId)
+        : Promise.resolve(undefined),
+      // プロジェクトの計画情報(v0.10 §4.2。内部で非ブロッキング)
+      targetProjectId !== undefined
+        ? fetchProjectContextById(pool, targetProjectId)
+        : Promise.resolve(undefined),
+      fetchRecentTurns(pool, user.user_id, MAX_CONTEXT_TURNS),
+      // カレンダー情報(v0.14 §2.3): 予定質問を検知し、かつカレンダー連携が有効な場合のみ
+      // 本人の対象日の予定を取得する(fetchEventsText は失敗時 undefined を返す非ブロッキング設計 — 原則4)
+      scheduleDateJst !== undefined && calendarEnabled()
+        ? fetchEventsText(user.email, scheduleDateJst)
+        : Promise.resolve(undefined),
+    ]);
 
   const customerContextBlock =
     customerContext === undefined ? '' : `\n\n## 顧客マスタ情報\n${customerContext}`;
   const projectContextBlock =
     projectContext === undefined ? '' : `\n\n## プロジェクト情報\n${projectContext}`;
+  // カレンダー情報(v0.14 §2.3): 取得できた場合のみ対象日つきのブロックとして供給する
+  const calendarBlock =
+    calendarText === undefined || scheduleDateJst === undefined
+      ? ''
+      : `\n\n## カレンダー情報(${scheduleDateJst} の予定)\n${calendarText}`;
   const analogyBlock =
     analogies.length === 0
       ? ''
@@ -534,7 +552,7 @@ async function answerAdhocQuestion(
 
   const { value, result } = await generateJson<QaLlmResponse>({
     tier,
-    system: `${SYSTEM_PROMPT}\n\n${ADHOC_QA_INSTRUCTION}${customerContextBlock}${projectContextBlock}\n\n## 参考情報\n${formatKnowledgeContext(chunks)}${analogyBlock}`,
+    system: `${SYSTEM_PROMPT}\n\n${ADHOC_QA_INSTRUCTION}${customerContextBlock}${projectContextBlock}${calendarBlock}\n\n## 参考情報\n${formatKnowledgeContext(chunks)}${analogyBlock}`,
     messages: mergeConsecutiveTurns(turnsToMessages(recentTurns, text)),
     responseSchema: ADHOC_QA_RESPONSE_SCHEMA as unknown as Record<string, unknown>,
   });

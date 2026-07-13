@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { jstDateString, jstDateStringDaysAgo } from '@ai-manager/shared';
 import type { OpsUser } from '../src/auth.js';
 import type { ChatEvent } from '../src/chat-event.js';
 import { handleMessage } from '../src/handlers/message.js';
@@ -8,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   generateJson: vi.fn(),
   embedTexts: vi.fn(async (texts: string[]) => texts.map(() => [0.1, 0.2, 0.3])),
   sendChatMessage: vi.fn(async () => ({})),
+  fetchEventsText: vi.fn(),
 }));
 
 vi.mock('@ai-manager/shared', async (importOriginal) => {
@@ -17,6 +19,7 @@ vi.mock('@ai-manager/shared', async (importOriginal) => {
     generateJson: mocks.generateJson,
     embedTexts: mocks.embedTexts,
     sendChatMessage: mocks.sendChatMessage,
+    fetchEventsText: mocks.fetchEventsText,
   };
 });
 
@@ -31,6 +34,7 @@ beforeEach(() => {
   mocks.generateJson.mockReset();
   mocks.embedTexts.mockClear();
   mocks.sendChatMessage.mockClear();
+  mocks.fetchEventsText.mockReset();
 });
 
 const admin: OpsUser = {
@@ -1131,5 +1135,119 @@ describe('顧客⇔プロジェクト相関の文脈供給(v0.13)', () => {
     expect(genCall.system).toContain('### 登録プロジェクト');
     expect(genCall.system).toContain('- しまむらWMS(進行中)');
     expect(response.text).toBe('進行中のプロジェクトは「しまむらWMS」です。');
+  });
+});
+
+describe('随時 QA のカレンダー参照(v0.14)', () => {
+  const qaResponder: Responder = (text) => {
+    if (text.includes('FROM ops.suggestions')) return { rows: [] };
+    if (text.includes('INSERT INTO ops.dialogues')) {
+      return { rows: [{ dialogue_id: '81', created_at: new Date() }] };
+    }
+    return { rows: [] };
+  };
+
+  beforeEach(() => {
+    process.env['CALENDAR_ENABLED'] = 'true';
+  });
+
+  afterEach(() => {
+    delete process.env['CALENDAR_ENABLED'];
+  });
+
+  it('「私の明日の予定を確認して」で翌日のカレンダー情報が system に入る(インシデントの再現)', async () => {
+    mocks.fetchEventsText.mockResolvedValueOnce('- 10:00-11:00 A社定例');
+    mocks.generateJson.mockResolvedValueOnce({
+      value: { answer: '明日は 10:00 から A社定例があります。', confidence: 'high' },
+      result: llmResult,
+    });
+    const { pool } = createMockPool(qaResponder);
+
+    const response = await handleMessage(pool, messageEvent('私の明日の予定を確認して'), member);
+
+    // 対象日は翌日(JST)。本人(質問者)のメールアドレスで委任取得する
+    const tomorrow = jstDateStringDaysAgo(-1);
+    expect(mocks.fetchEventsText).toHaveBeenCalledWith('member@example.com', tomorrow);
+    const genCall = mocks.generateJson.mock.calls[0]?.[0] as { system: string };
+    expect(genCall.system).toContain(`## カレンダー情報(${tomorrow} の予定)`);
+    expect(genCall.system).toContain('- 10:00-11:00 A社定例');
+    expect(response.text).toBe('明日は 10:00 から A社定例があります。');
+  });
+
+  it('「明後日の予定は?」は翌々日の予定を参照する', async () => {
+    mocks.fetchEventsText.mockResolvedValueOnce('(この日の予定はありません)');
+    mocks.generateJson.mockResolvedValueOnce({
+      value: { answer: '明後日に登録された予定はありません。', confidence: 'high' },
+      result: llmResult,
+    });
+    const { pool } = createMockPool(qaResponder);
+
+    await handleMessage(pool, messageEvent('明後日の予定は?'), member);
+
+    const dayAfterTomorrow = jstDateStringDaysAgo(-2);
+    expect(mocks.fetchEventsText).toHaveBeenCalledWith('member@example.com', dayAfterTomorrow);
+    const genCall = mocks.generateJson.mock.calls[0]?.[0] as { system: string };
+    expect(genCall.system).toContain(`## カレンダー情報(${dayAfterTomorrow} の予定)`);
+    expect(genCall.system).toContain('(この日の予定はありません)');
+  });
+
+  it('日付の指定がない予定質問は当日を参照する', async () => {
+    mocks.fetchEventsText.mockResolvedValueOnce('- 15:00-16:00 社内MTG');
+    mocks.generateJson.mockResolvedValueOnce({
+      value: { answer: '本日は 15:00 から社内MTGがあります。', confidence: 'high' },
+      result: llmResult,
+    });
+    const { pool } = createMockPool(qaResponder);
+
+    await handleMessage(pool, messageEvent('今日のスケジュールを確認したい'), member);
+
+    expect(mocks.fetchEventsText).toHaveBeenCalledWith('member@example.com', jstDateString());
+  });
+
+  it('予定キーワードを含まない質問ではカレンダーを参照しない', async () => {
+    mocks.generateJson.mockResolvedValueOnce({
+      value: { answer: '一般的な回答です。', confidence: 'high' },
+      result: llmResult,
+    });
+    const { pool } = createMockPool(qaResponder);
+
+    await handleMessage(pool, messageEvent('在庫の一般的な考え方を教えて'), member);
+
+    expect(mocks.fetchEventsText).not.toHaveBeenCalled();
+    const genCall = mocks.generateJson.mock.calls[0]?.[0] as { system: string };
+    expect(genCall.system).not.toContain('## カレンダー情報');
+  });
+
+  it('CALENDAR_ENABLED 無効時はカレンダーを参照せず、ブロックなしで従来どおり回答する', async () => {
+    delete process.env['CALENDAR_ENABLED'];
+    mocks.generateJson.mockResolvedValueOnce({
+      value: { answer: '参考情報に基づく回答です。', confidence: 'high' },
+      result: llmResult,
+    });
+    const { pool } = createMockPool(qaResponder);
+
+    const response = await handleMessage(pool, messageEvent('私の明日の予定を確認して'), member);
+
+    expect(mocks.fetchEventsText).not.toHaveBeenCalled();
+    const genCall = mocks.generateJson.mock.calls[0]?.[0] as { system: string };
+    expect(genCall.system).not.toContain('## カレンダー情報');
+    expect(response.text).toBe('参考情報に基づく回答です。');
+  });
+
+  it('カレンダー取得に失敗しても QA は継続する(非ブロッキング — 原則4)', async () => {
+    // fetchEventsText は取得失敗時に例外ではなく undefined を返す設計(v0.14 §2.4)
+    mocks.fetchEventsText.mockResolvedValueOnce(undefined);
+    mocks.generateJson.mockResolvedValueOnce({
+      value: { answer: '予定は確認できませんでした。', confidence: 'medium' },
+      result: llmResult,
+    });
+    const { pool } = createMockPool(qaResponder);
+
+    const response = await handleMessage(pool, messageEvent('明日の予定を教えて'), member);
+
+    expect(mocks.fetchEventsText).toHaveBeenCalledTimes(1);
+    const genCall = mocks.generateJson.mock.calls[0]?.[0] as { system: string };
+    expect(genCall.system).not.toContain('## カレンダー情報');
+    expect(response.text).toBe('予定は確認できませんでした。');
   });
 });
