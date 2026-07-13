@@ -143,8 +143,9 @@ export function checkinDots(
   return raw(`<span class="dots">${dots}</span>`);
 }
 
-export function section(title: string, body: Raw, desc?: string): Raw {
-  return html`<section class="section">
+/** id を付けるとページ内アンカー(PRG リダイレクトの #fragment)の遷移先になる。 */
+export function section(title: string, body: Raw, desc?: string, id?: string): Raw {
+  return html`<section class="section"${id === undefined ? '' : raw(` id="${h(id)}"`)}>
     <h2>${title}</h2>
     ${desc === undefined ? '' : html`<p class="section-desc">${desc}</p>`}
     ${body}

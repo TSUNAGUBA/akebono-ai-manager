@@ -25,7 +25,19 @@ export async function runKnowledgeSync(pool: pg.Pool): Promise<JobSummary> {
     return summary;
   }
 
-  const files = await listFilesRecursive(folderId);
+  const { files, unresolvedShortcuts } = await listFilesRecursive(folderId);
+  if (unresolvedShortcuts.length > 0) {
+    logger.warn('アクセスできないショートカットがあります(先を読めないため同期対象外)', {
+      shortcuts: unresolvedShortcuts.slice(0, 20),
+      hint: 'ショートカットは Drive の共有権限を引き継ぎません。実体フォルダをナレッジフォルダ内へ移動するか、ショートカット先をランタイム SA に共有してください(deployment-setup.md Step 7-3)',
+    });
+  }
+  if (files.length === 0) {
+    logger.warn('ナレッジフォルダにファイルが見つかりません(同期対象なし)', {
+      folderId,
+      hint: 'KNOWLEDGE_DRIVE_FOLDER_ID のフォルダ ID が意図した場所か、フォルダがランタイム SA に共有されているかを、ダッシュボードのナレッジ管理ページ(文書一覧)で確認してください',
+    });
+  }
   // 削除掃除の保護対象は「Drive に存在する全ファイル」。
   // 取得に失敗したファイルのチャンクを誤って消さないよう、列挙時点で確定する。
   const seenDocIds = files.map((f) => f.id);
@@ -162,10 +174,14 @@ export async function runKnowledgeSync(pool: pg.Pool): Promise<JobSummary> {
   }
 
   // Drive から削除された文書のチャンクを削除(全ファイル列挙に成功した場合のみ)。
+  // アクセスできないショートカットがある場合は、その配下のファイルを列挙できておらず
+  // 「削除された」と誤判定し得るため、掃除をスキップして既存チャンクを保護する(原則2)。
   // doc_id='escalation/{id}' のチャンクは Drive 由来ではなく、SoT が ops.escalations にある
   // 裁定ナレッジのキャッシュ(chat-gateway が還流)のため、掃除対象から除外する。
   try {
-    if (files.length > 0) {
+    if (unresolvedShortcuts.length > 0) {
+      logger.info('アクセスできないショートカットがあるため、削除済み文書のチャンク掃除をスキップします');
+    } else if (files.length > 0) {
       await query(
         pool,
         `DELETE FROM rag.knowledge_chunks

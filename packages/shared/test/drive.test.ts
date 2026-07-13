@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ERROR_CODES, isAppError } from '../src/errors.js';
-import { ensureSubfolder, trashFile, upsertTextFile } from '../src/drive.js';
+import { ensureSubfolder, listFilesRecursive, trashFile, upsertFile, upsertTextFile } from '../src/drive.js';
 
 // トークン取得(ADC)はモックし、Drive API への fetch を検証する
 vi.mock('../src/google-auth.js', async (importOriginal) => {
@@ -13,6 +13,8 @@ interface FetchCall {
   method: string;
   contentType: string | undefined;
   body: string | undefined;
+  /** バイナリボディ(Buffer / Uint8Array)の捕捉用(v0.11: PDF 投入)。 */
+  bodyBuffer: Buffer | undefined;
 }
 
 let calls: FetchCall[];
@@ -37,6 +39,7 @@ beforeEach(() => {
         method: init?.method ?? 'GET',
         contentType: headers['content-type'],
         body: typeof init?.body === 'string' ? init.body : undefined,
+        bodyBuffer: init?.body instanceof Uint8Array ? Buffer.from(init.body) : undefined,
       });
       const res = responses.shift();
       if (res === undefined) throw new Error('想定外の fetch 呼び出しです');
@@ -183,6 +186,140 @@ describe('ensureSubfolder(サブフォルダの検索+なければ作成)', () =
     const folderId = await ensureSubfolder('root-1', 'judgement');
     expect(folderId).toBe('dir-judgement');
     expect(calls).toHaveLength(1);
+  });
+});
+
+describe('upsertFile(v0.11: バイナリ(PDF)の投入)', () => {
+  it('既存なし: multipart/related の Buffer ボディで application/pdf として新規作成する', async () => {
+    responses.push(jsonResponse(200, { files: [] }), jsonResponse(200, { id: 'pdf-1' }));
+    const bytes = Buffer.from('%PDF-1.7 dummy');
+
+    const result = await upsertFile('folder-1', '取引基準.pdf', bytes, 'application/pdf');
+
+    expect(result).toEqual({ fileId: 'pdf-1', action: 'created' });
+    expect(calls[1]?.method).toBe('POST');
+    expect(calls[1]?.url).toContain('uploadType=multipart');
+    expect(calls[1]?.contentType).toContain('multipart/related');
+    // バイナリは Buffer ボディ(文字列化しない)で、メタデータ+本文+終端を含む
+    expect(calls[1]?.bodyBuffer).toBeDefined();
+    const body = calls[1]?.bodyBuffer?.toString('latin1') ?? '';
+    expect(body).toContain('"mimeType":"application/pdf"');
+    expect(body).toContain('%PDF-1.7 dummy');
+    expect(calls[1]?.bodyBuffer?.toString('utf8')).toContain('"name":"取引基準.pdf"');
+  });
+
+  it('既存あり: PATCH /upload(uploadType=media)でバイナリ内容のみ更新する', async () => {
+    responses.push(jsonResponse(200, { files: [{ id: 'pdf-1' }] }), jsonResponse(200, {}));
+    const bytes = Buffer.from('%PDF-1.7 v2');
+    const result = await upsertFile('folder-1', '取引基準.pdf', bytes, 'application/pdf');
+    expect(result).toEqual({ fileId: 'pdf-1', action: 'updated' });
+    expect(calls[1]?.method).toBe('PATCH');
+    expect(calls[1]?.contentType).toBe('application/pdf');
+    expect(calls[1]?.bodyBuffer?.toString('latin1')).toBe('%PDF-1.7 v2');
+  });
+});
+
+describe('listFilesRecursive(v0.11: ショートカット解決)', () => {
+  it('フォルダショートカットは実体を辿り、ファイルショートカットは実体 ID で列挙する', async () => {
+    responses.push(
+      // ルート直下: 実体フォルダ customer と、フォルダショートカット linked-domain
+      jsonResponse(200, {
+        files: [
+          { id: 'dir-customer', name: 'customer', mimeType: 'application/vnd.google-apps.folder' },
+          {
+            id: 'sc-domain',
+            name: 'domain',
+            mimeType: 'application/vnd.google-apps.shortcut',
+            shortcutDetails: { targetId: 'dir-domain', targetMimeType: 'application/vnd.google-apps.folder' },
+          },
+        ],
+      }),
+      // customer 直下: ファイルショートカット
+      jsonResponse(200, {
+        files: [
+          {
+            id: 'sc-file',
+            name: 'リンク文書.md',
+            mimeType: 'application/vnd.google-apps.shortcut',
+            shortcutDetails: { targetId: 'real-file', targetMimeType: 'text/markdown' },
+          },
+        ],
+      }),
+      // ショートカット先フォルダ(dir-domain)直下: 実ファイル
+      jsonResponse(200, {
+        files: [{ id: 'ops-file', name: 'operations.md', mimeType: 'text/markdown' }],
+      }),
+    );
+
+    const listing = await listFilesRecursive('root-1');
+
+    expect(listing.unresolvedShortcuts).toEqual([]);
+    expect(listing.files).toEqual([
+      {
+        id: 'real-file',
+        name: 'リンク文書.md',
+        mimeType: 'text/markdown',
+        path: 'customer',
+        modifiedTime: undefined,
+        shortcutId: 'sc-file',
+      },
+      {
+        id: 'ops-file',
+        name: 'operations.md',
+        mimeType: 'text/markdown',
+        path: 'domain',
+        modifiedTime: undefined,
+      },
+    ]);
+    // shortcutDetails をフィールド指定に含めて問い合わせている
+    expect(decodeQuery(calls[0]?.url ?? '')).toContain('shortcutDetails');
+  });
+
+  it('ショートカット先フォルダにアクセスできない場合は全体を止めず unresolvedShortcuts に記録する', async () => {
+    responses.push(
+      jsonResponse(200, {
+        files: [
+          {
+            id: 'sc-x',
+            name: 'shimamura',
+            mimeType: 'application/vnd.google-apps.shortcut',
+            shortcutDetails: { targetId: 'dir-x', targetMimeType: 'application/vnd.google-apps.folder' },
+          },
+          { id: 'f-1', name: 'ルール.md', mimeType: 'text/markdown' },
+        ],
+      }),
+      jsonResponse(404, { error: { message: 'not shared' } }), // ショートカット先の列挙が権限エラー
+    );
+
+    const listing = await listFilesRecursive('root-1');
+
+    expect(listing.unresolvedShortcuts).toEqual([{ name: 'shimamura', path: 'shimamura' }]);
+    expect(listing.files.map((f) => f.id)).toEqual(['f-1']);
+  });
+
+  it('実体フォルダの列挙失敗は従来どおり例外(設定不備の顕在化)', async () => {
+    responses.push(jsonResponse(403, { error: { message: 'no access' } }));
+    await expectAppErrorAsync(() => listFilesRecursive('root-1'), ERROR_CODES.DRIVE_SYNC_FAILED, 500);
+  });
+
+  it('同一実体が実体・ショートカットの両方で見える場合は実体を優先し重複させない', async () => {
+    responses.push(
+      jsonResponse(200, {
+        files: [
+          {
+            id: 'sc-dup',
+            name: '別名.md',
+            mimeType: 'application/vnd.google-apps.shortcut',
+            shortcutDetails: { targetId: 'real-1', targetMimeType: 'text/markdown' },
+          },
+          { id: 'real-1', name: '実体.md', mimeType: 'text/markdown' },
+        ],
+      }),
+    );
+    const listing = await listFilesRecursive('root-1');
+    expect(listing.files).toHaveLength(1);
+    expect(listing.files[0]?.name).toBe('実体.md');
+    expect(listing.files[0]?.shortcutId).toBeUndefined();
   });
 });
 

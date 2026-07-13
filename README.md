@@ -7,7 +7,7 @@
 いつものチャットに返事をするだけで、日報が自動で完成し、業務知識が即座に手に入り、
 「予想 → 実行 → 振り返り」の思考サイクルが無理なく回り始めます。
 
-- 📘 要件・基本設計: [docs/refference/ai-manager-requirements-design.md](docs/refference/ai-manager-requirements-design.md)(v0.2)+ [v0.3 追補(マスタ管理とナレッジスコープ)](docs/refference/ai-manager-requirements-v0.3-addendum.md)+ [v0.4 追補(ナレッジ管理 UI)](docs/refference/ai-manager-requirements-v0.4-addendum.md)+ [v0.5 追補(管理者発火の状況確認)](docs/refference/ai-manager-requirements-v0.5-addendum.md)+ [v0.6 追補(ナレッジのファイルアップロード投入)](docs/refference/ai-manager-requirements-v0.6-addendum.md)+ [v0.7 追補(顧客マスタ情報の回答参照)](docs/refference/ai-manager-requirements-v0.7-addendum.md)+ [v0.8 追補(問いかけ対象のユーザー単位設定)](docs/refference/ai-manager-requirements-v0.8-addendum.md)+ [v0.9 追補(プロジェクト管理 UI・優先順改訂・エイリアス照合・対話の耐障害性)](docs/refference/ai-manager-requirements-v0.9-addendum.md)+ [v0.10 追補(プロジェクト計画情報・タスク進捗管理・AI への文脈供給)](docs/refference/ai-manager-requirements-v0.10-addendum.md)
+- 📘 要件・基本設計: [docs/refference/ai-manager-requirements-design.md](docs/refference/ai-manager-requirements-design.md)(v0.2)+ [v0.3 追補(マスタ管理とナレッジスコープ)](docs/refference/ai-manager-requirements-v0.3-addendum.md)+ [v0.4 追補(ナレッジ管理 UI)](docs/refference/ai-manager-requirements-v0.4-addendum.md)+ [v0.5 追補(管理者発火の状況確認)](docs/refference/ai-manager-requirements-v0.5-addendum.md)+ [v0.6 追補(ナレッジのファイルアップロード投入)](docs/refference/ai-manager-requirements-v0.6-addendum.md)+ [v0.7 追補(顧客マスタ情報の回答参照)](docs/refference/ai-manager-requirements-v0.7-addendum.md)+ [v0.8 追補(問いかけ対象のユーザー単位設定)](docs/refference/ai-manager-requirements-v0.8-addendum.md)+ [v0.9 追補(プロジェクト管理 UI・優先順改訂・エイリアス照合・対話の耐障害性)](docs/refference/ai-manager-requirements-v0.9-addendum.md)+ [v0.10 追補(プロジェクト計画情報・タスク進捗管理・AI への文脈供給)](docs/refference/ai-manager-requirements-v0.10-addendum.md)+ [v0.11 追補(ナレッジ同期の診断性・PDF 対応・ファイル名規約撤廃・フォーム改善)](docs/refference/ai-manager-requirements-v0.11-addendum.md)
 - 📗 導入前後の変化(非エンジニア向け): [docs/refference/ai-manager-before-after-guide.md](docs/refference/ai-manager-before-after-guide.md)
 - 📙 Phase 1 実装設計・ADR: [docs/architecture/phase1-implementation.md](docs/architecture/phase1-implementation.md)
 - 🚀 デプロイ設定手順: [docs/operations/deployment-setup.md](docs/operations/deployment-setup.md)
@@ -23,7 +23,7 @@
 | エスカレーション(M6) | AI が確信を持てない事項を管理者へ自動ルーティング |
 | 可視化ダッシュボード(M5) | プロジェクト横断の進捗、タスク負荷、個人の振り返り資産、成長観察(管理者限定)、AI コスト |
 | マスタ管理(v0.3/v0.8/v0.9/v0.10) | 業界・顧客(エイリアス含む)・顧客間関係・関係種別・プロジェクト(内容・目的・マイルストーン・タスク進捗を含む)の各マスタと、ユーザー単位の問いかけ可否をダッシュボードから管理(管理者限定。要 DB_ADMIN_USER / DB_ADMIN_PASSWORD)。計画情報は AI の対話文脈に供給される |
-| ナレッジ管理(v0.4/v0.6) | ナレッジ文書の一覧・投入(直接入力+ファイルアップロード複数可)・上書き・削除・即時同期をダッシュボードから実行(管理者限定。SoT は Drive のまま。要フォルダの編集者共有) |
+| ナレッジ管理(v0.4/v0.6/v0.11) | ナレッジ文書の一覧・投入(直接入力+ファイルアップロード複数可 — .md / .txt / .pdf、日本語ファイル名可)・上書き・削除・即時同期をダッシュボードから実行(管理者限定。SoT は Drive のまま。要フォルダの編集者共有)。ショートカットは実体へ解決し、同期対象フォルダへの導線と警告で設定ずれを自己診断できる |
 | 状況確認(v0.5) | 管理者がダッシュボードから個別/全員へ進捗・状況の問いかけを送信(管理者限定)。返信は対話として記録され、日報・分析の入力になる |
 
 ## アーキテクチャ

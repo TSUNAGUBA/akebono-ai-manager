@@ -37,8 +37,12 @@ const SAVED_MESSAGES: Record<string, string> = {
   deleted: '削除しました',
 };
 
-/** 保存結果(?saved=)と入力エラーのバナー。 */
-export function flashMessages(ctx: AdminPageContext): Raw {
+/**
+ * 保存結果(?saved=)と入力エラーのバナー。ページ固有のフラッシュ(ナレッジの
+ * アップロード結果等)は extra で渡す。バナー群は sticky なスタックにまとめ、
+ * アンカー付きリダイレクトでページ中程に遷移しても結果が視界に入るようにする(v0.11)。
+ */
+export function flashMessages(ctx: AdminPageContext, ...extra: Raw[]): Raw {
   const parts: string[] = [];
   if (ctx.errorMessage !== undefined) {
     parts.push(`<div class="alert error">${h(ctx.errorMessage)}</div>`);
@@ -50,7 +54,11 @@ export function flashMessages(ctx: AdminPageContext): Raw {
   if (message !== undefined) {
     parts.push(`<div class="alert ok">${h(message)}</div>`);
   }
-  return raw(parts.join(''));
+  for (const part of extra) {
+    if (part.html !== '') parts.push(part.html);
+  }
+  if (parts.length === 0) return raw('');
+  return raw(`<div class="alert-stack">${parts.join('')}</div>`);
 }
 
 /** 全 POST フォーム必須の CSRF hidden input。 */

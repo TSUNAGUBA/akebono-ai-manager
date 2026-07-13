@@ -208,7 +208,7 @@ export async function renderAdminRelations(pool: pg.Pool, ctx: AdminPageContext)
       relationTable,
       '関係はナレッジ検索のスコープ導出(関係先顧客の固有ナレッジ・業界ナレッジの参照)に使われます',
     )}
-    ${section('関係の追加', createRelationForm)}
+    ${section('関係の追加', createRelationForm, undefined, 'relation-create')}
     ${editingType === undefined
       ? html``
       : section(`関係種別の編集: ${editingType.relation_type}`, typeEditForm)}
@@ -217,7 +217,7 @@ export async function renderAdminRelations(pool: pg.Pool, ctx: AdminPageContext)
       typeTable,
       '参照整合性のため物理削除はせず「無効」で運用します(無効化すると追加フォームの選択肢から外れます)',
     )}
-    ${section('関係種別の追加', typeCreateForm)}
+    ${section('関係種別の追加', typeCreateForm, undefined, 'type-create')}
   `;
 }
 
@@ -260,7 +260,8 @@ export async function handleAdminRelationsPost(
       { fromCustomerId: fromId, toCustomerId: toId, relationType },
       { notes },
     );
-    return `${PATH}?saved=created`;
+    // アンカーで追加フォームへ戻る(連続追加時に最上部へ飛ばされない — v0.11)
+    return `${PATH}?saved=created#relation-create`;
   }
 
   if (action === 'delete_relation') {
@@ -301,7 +302,7 @@ export async function handleAdminRelationsPost(
       throw err;
     }
     auditLog(viewer, 'relation_type.create', { relationType }, { label, active });
-    return `${PATH}?saved=created`;
+    return `${PATH}?saved=created#type-create`;
   }
 
   if (action === 'update_type') {

@@ -16,6 +16,8 @@ const DRIVE_UPLOAD_API = 'https://www.googleapis.com/upload/drive/v3';
 
 export const FOLDER_MIME = 'application/vnd.google-apps.folder';
 export const GOOGLE_DOC_MIME = 'application/vnd.google-apps.document';
+export const SHORTCUT_MIME = 'application/vnd.google-apps.shortcut';
+export const PDF_MIME = 'application/pdf';
 
 /** ナレッジ管理 UI から投入するテキスト文書の MIME タイプ。 */
 const TEXT_FILE_MIME = 'text/markdown';
@@ -28,10 +30,33 @@ export interface DriveFile {
   path: string;
   /** Drive 側の最終更新日時(RFC3339)。一覧表示用の補助情報 */
   modifiedTime?: string;
+  /**
+   * ショートカット経由で列挙されたファイルの、ショートカット自体の ID。
+   * id はショートカット先(実体)を指す。ナレッジからの削除はショートカットを
+   * ゴミ箱へ移動する(実体は元の場所に残す — v0.11)
+   */
+  shortcutId?: string;
+}
+
+/** ナレッジフォルダ配下の列挙結果。 */
+export interface DriveFolderListing {
+  files: DriveFile[];
+  /**
+   * アクセスできなかったショートカット(先のフォルダが SA に共有されていない等)。
+   * ショートカットは共有権限を引き継がないため、実体側の共有が必要(v0.11)。
+   * 同期側はこれが空でない場合、削除掃除をスキップして既存チャンクを保護する
+   */
+  unresolvedShortcuts: Array<{ name: string; path: string }>;
 }
 
 interface FilesListResponse {
-  files?: Array<{ id?: string; name?: string; mimeType?: string; modifiedTime?: string }>;
+  files?: Array<{
+    id?: string;
+    name?: string;
+    mimeType?: string;
+    modifiedTime?: string;
+    shortcutDetails?: { targetId?: string; targetMimeType?: string };
+  }>;
   nextPageToken?: string;
 }
 
@@ -54,7 +79,13 @@ export async function driveFetch(url: string): Promise<Response> {
   return res;
 }
 
-type DriveChild = { id: string; name: string; mimeType: string; modifiedTime?: string };
+type DriveChild = {
+  id: string;
+  name: string;
+  mimeType: string;
+  modifiedTime?: string;
+  shortcutDetails?: { targetId?: string; targetMimeType?: string };
+};
 
 async function listChildren(folderId: string): Promise<DriveChild[]> {
   const children: DriveChild[] = [];
@@ -62,7 +93,7 @@ async function listChildren(folderId: string): Promise<DriveChild[]> {
   do {
     const params = new URLSearchParams({
       q: `'${folderId}' in parents and trashed = false`,
-      fields: 'files(id,name,mimeType,modifiedTime),nextPageToken',
+      fields: 'files(id,name,mimeType,modifiedTime,shortcutDetails),nextPageToken',
       pageSize: '100',
       supportsAllDrives: 'true',
       includeItemsFromAllDrives: 'true',
@@ -72,7 +103,13 @@ async function listChildren(folderId: string): Promise<DriveChild[]> {
     const json = (await res.json()) as FilesListResponse;
     for (const f of json.files ?? []) {
       if (f.id !== undefined && f.name !== undefined && f.mimeType !== undefined) {
-        children.push({ id: f.id, name: f.name, mimeType: f.mimeType, modifiedTime: f.modifiedTime });
+        children.push({
+          id: f.id,
+          name: f.name,
+          mimeType: f.mimeType,
+          modifiedTime: f.modifiedTime,
+          shortcutDetails: f.shortcutDetails,
+        });
       }
     }
     pageToken = json.nextPageToken;
@@ -80,10 +117,19 @@ async function listChildren(folderId: string): Promise<DriveChild[]> {
   return children;
 }
 
-/** ナレッジフォルダ配下を再帰的に列挙する(フォルダパス付き)。 */
-export async function listFilesRecursive(rootFolderId: string): Promise<DriveFile[]> {
-  const files: DriveFile[] = [];
-  const queue: Array<{ id: string; path: string }> = [{ id: rootFolderId, path: '' }];
+/**
+ * ナレッジフォルダ配下を再帰的に列挙する(フォルダパス付き)。
+ * ショートカット(v0.11)は実体へ解決して辿る。ただしショートカットは Drive の
+ * 共有権限を引き継がないため、実体側が SA に共有されていないと先を読めない —
+ * その場合は全体を止めず unresolvedShortcuts に記録して継続する(原則4)。
+ * 実体フォルダ(ショートカット経由でない)の列挙失敗は従来どおり例外(設定不備の顕在化)。
+ */
+export async function listFilesRecursive(rootFolderId: string): Promise<DriveFolderListing> {
+  const filesById = new Map<string, DriveFile>();
+  const unresolvedShortcuts: DriveFolderListing['unresolvedShortcuts'] = [];
+  const queue: Array<{ id: string; path: string; viaShortcutName?: string }> = [
+    { id: rootFolderId, path: '' },
+  ];
   const visited = new Set<string>();
 
   while (queue.length > 0) {
@@ -91,15 +137,40 @@ export async function listFilesRecursive(rootFolderId: string): Promise<DriveFil
     if (current === undefined || visited.has(current.id)) continue;
     visited.add(current.id);
 
-    const children = await listChildren(current.id);
+    let children: DriveChild[];
+    try {
+      children = await listChildren(current.id);
+    } catch (err) {
+      if (current.viaShortcutName !== undefined) {
+        unresolvedShortcuts.push({ name: current.viaShortcutName, path: current.path });
+        continue;
+      }
+      throw err;
+    }
     for (const child of children) {
+      const childPath = current.path === '' ? child.name : `${current.path}/${child.name}`;
       if (child.mimeType === FOLDER_MIME) {
-        queue.push({
-          id: child.id,
-          path: current.path === '' ? child.name : `${current.path}/${child.name}`,
-        });
+        queue.push({ id: child.id, path: childPath });
+      } else if (child.mimeType === SHORTCUT_MIME) {
+        const targetId = child.shortcutDetails?.targetId;
+        if (targetId === undefined) {
+          unresolvedShortcuts.push({ name: child.name, path: current.path });
+        } else if (child.shortcutDetails?.targetMimeType === FOLDER_MIME) {
+          queue.push({ id: targetId, path: childPath, viaShortcutName: child.name });
+        } else if (!filesById.has(targetId)) {
+          // 同一実体が実体・ショートカットの両方で見える場合は実体を優先する
+          // (実体は下の分岐で無条件に set され、この登録を上書きする)
+          filesById.set(targetId, {
+            id: targetId,
+            name: child.name,
+            mimeType: child.shortcutDetails?.targetMimeType ?? 'application/octet-stream',
+            path: current.path,
+            modifiedTime: child.modifiedTime,
+            shortcutId: child.id,
+          });
+        }
       } else {
-        files.push({
+        filesById.set(child.id, {
           id: child.id,
           name: child.name,
           mimeType: child.mimeType,
@@ -109,7 +180,7 @@ export async function listFilesRecursive(rootFolderId: string): Promise<DriveFil
       }
     }
   }
-  return files;
+  return { files: [...filesById.values()], unresolvedShortcuts };
 }
 
 // ── 書込系(ナレッジ管理 UI: 要件 v0.4)──────────────────────────────────
@@ -121,7 +192,7 @@ export async function listFilesRecursive(rootFolderId: string): Promise<DriveFil
  */
 async function driveWriteFetch(
   url: string,
-  init: { method: 'GET' | 'POST' | 'PATCH'; contentType?: string; body?: string },
+  init: { method: 'GET' | 'POST' | 'PATCH'; contentType?: string; body?: string | Uint8Array },
 ): Promise<Response> {
   const token = await getAccessToken([SCOPES.DRIVE]);
   const headers: Record<string, string> = { authorization: `Bearer ${token}` };
@@ -215,40 +286,46 @@ export async function ensureSubfolder(parentId: string, ...pathSegments: string[
 }
 
 /**
- * テキストファイルの投入(上書き優先: v0.4 §1)。
- * 同名ファイル(trashed=false)があれば内容のみ更新し、なければ text/markdown で新規作成する。
+ * ファイルの投入(上書き優先: v0.4 §1)。
+ * 同名ファイル(trashed=false)があれば内容のみ更新し、なければ指定 MIME で新規作成する。
  * 再実行しても重複ファイルは生えない(冪等)。
+ * content が文字列の場合は UTF-8 テキスト、Uint8Array の場合はバイナリ(PDF 等 — v0.11)。
  */
-export async function upsertTextFile(
+export async function upsertFile(
   folderId: string,
   fileName: string,
-  content: string,
+  content: string | Uint8Array,
+  mimeType: string,
 ): Promise<{ fileId: string; action: 'created' | 'updated' }> {
   const existingId = await findChildByName(folderId, fileName, { foldersOnly: false });
 
   if (existingId !== undefined) {
     await driveWriteFetch(
       `${DRIVE_UPLOAD_API}/files/${encodeURIComponent(existingId)}?uploadType=media&supportsAllDrives=true`,
-      { method: 'PATCH', contentType: TEXT_FILE_MIME, body: content },
+      { method: 'PATCH', contentType: mimeType, body: content },
     );
     return { fileId: existingId, action: 'updated' };
   }
 
   // multipart/related でメタデータ+本文を一括作成する
   const boundary = `aim-${randomUUID()}`;
-  const metadata = JSON.stringify({ name: fileName, parents: [folderId], mimeType: TEXT_FILE_MIME });
-  const body = [
+  const metadata = JSON.stringify({ name: fileName, parents: [folderId], mimeType });
+  const head = [
     `--${boundary}`,
     'Content-Type: application/json; charset=UTF-8',
     '',
     metadata,
     `--${boundary}`,
-    `Content-Type: ${TEXT_FILE_MIME}; charset=UTF-8`,
+    typeof content === 'string' ? `Content-Type: ${mimeType}; charset=UTF-8` : `Content-Type: ${mimeType}`,
     '',
-    content,
-    `--${boundary}--`,
     '',
   ].join('\r\n');
+  const tail = `\r\n--${boundary}--\r\n`;
+  // テキストは従来どおり文字列ボディ、バイナリは Buffer 連結(文字コード変換を避ける)
+  const body =
+    typeof content === 'string'
+      ? head + content + tail
+      : Buffer.concat([Buffer.from(head, 'utf8'), Buffer.from(content), Buffer.from(tail, 'utf8')]);
   const res = await driveWriteFetch(
     `${DRIVE_UPLOAD_API}/files?uploadType=multipart&supportsAllDrives=true`,
     { method: 'POST', contentType: `multipart/related; boundary=${boundary}`, body },
@@ -261,6 +338,15 @@ export async function upsertTextFile(
     });
   }
   return { fileId: created.id, action: 'created' };
+}
+
+/** テキストファイルの投入(text/markdown)。upsertFile の従来 I/F 互換ラッパー。 */
+export async function upsertTextFile(
+  folderId: string,
+  fileName: string,
+  content: string,
+): Promise<{ fileId: string; action: 'created' | 'updated' }> {
+  return upsertFile(folderId, fileName, content, TEXT_FILE_MIME);
 }
 
 /**

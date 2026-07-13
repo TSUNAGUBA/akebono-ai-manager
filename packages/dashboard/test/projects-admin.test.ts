@@ -246,7 +246,7 @@ describe('プロジェクト管理の書込ハンドラ(POST)', () => {
       null, // objective(任意・未入力)
       null, // description(任意・未入力)
     ]);
-    expect(location).toBe('/admin/projects?saved=created');
+    expect(location).toBe('/admin/projects?saved=created#create');
   });
 
   it('create: 顧客・担当管理者は未指定(空)なら NULL で登録できる', async () => {
@@ -437,7 +437,7 @@ describe('マイルストーン管理(POST・v0.10)', () => {
     );
     const insert = captured.find((c) => c.text.includes('INSERT INTO ops.project_milestones'));
     expect(insert?.params).toEqual(['a-sha-si', '要件確定', '2026-07-20']);
-    expect(location).toBe('/admin/projects?edit=a-sha-si&saved=created');
+    expect(location).toBe('/admin/projects?edit=a-sha-si&saved=created#milestones');
   });
 
   it('add_milestone: 期日は任意(空なら NULL)。不正な日付形式は AIM-6004(400)', async () => {
@@ -574,7 +574,7 @@ describe('タスク進捗の更新(POST・v0.10)', () => {
     expect(beginIdx).toBeGreaterThan(-1);
     expect(commitIdx).toBeGreaterThan(captured.findIndex((c) => c.text.includes('task_status_log')));
 
-    expect(location).toBe('/admin/projects?edit=a-sha-si&saved=updated');
+    expect(location).toBe('/admin/projects?edit=a-sha-si&saved=updated#tasks');
   });
 
   it('同一状態への更新は no-op(履歴を汚さない・冪等)', async () => {

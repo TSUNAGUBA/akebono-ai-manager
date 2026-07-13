@@ -1,14 +1,23 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type pg from 'pg';
-import { AppError, ERROR_CODES, isAppError, type DriveFile, type MultipartFile } from '@ai-manager/shared';
+import { AppError, ERROR_CODES, isAppError, type DriveFolderListing, type MultipartFile } from '@ai-manager/shared';
 import type { Viewer } from '../src/render/layout.js';
 import type { AdminPageContext } from '../src/pages/admin/common.js';
 
 const mocks = vi.hoisted(() => ({
-  listFilesRecursive: vi.fn<(rootFolderId: string) => Promise<DriveFile[]>>(),
+  listFilesRecursive: vi.fn<(rootFolderId: string) => Promise<DriveFolderListing>>(),
   ensureSubfolder: vi.fn<(parentId: string, ...segments: string[]) => Promise<string>>(),
   upsertTextFile:
     vi.fn<(folderId: string, fileName: string, content: string) => Promise<{ fileId: string; action: 'created' | 'updated' }>>(),
+  upsertFile:
+    vi.fn<
+      (
+        folderId: string,
+        fileName: string,
+        content: string | Uint8Array,
+        mimeType: string,
+      ) => Promise<{ fileId: string; action: 'created' | 'updated' }>
+    >(),
   trashFile: vi.fn<(fileId: string) => Promise<void>>(),
   getIdTokenFor: vi.fn<(audience: string) => Promise<string>>(),
 }));
@@ -88,19 +97,25 @@ beforeEach(() => {
     savedEnv[name] = process.env[name];
     delete process.env[name];
   }
-  mocks.listFilesRecursive.mockReset().mockResolvedValue([
-    {
-      id: 'doc-1',
-      name: 'profile.md',
-      mimeType: 'text/markdown',
-      path: 'customer/acme',
-      // UTC 16:00 = JST 翌 01:00(タイムゾーン変換の確認用)
-      modifiedTime: '2026-07-08T16:00:00.000Z',
-    },
-    { id: 'doc-2', name: 'ルール.md', mimeType: 'text/markdown', path: 'judgement' },
-  ]);
+  mocks.listFilesRecursive.mockReset().mockResolvedValue({
+    files: [
+      {
+        id: 'doc-1',
+        name: 'profile.md',
+        mimeType: 'text/markdown',
+        path: 'customer/acme',
+        // UTC 16:00 = JST 翌 01:00(タイムゾーン変換の確認用)
+        modifiedTime: '2026-07-08T16:00:00.000Z',
+      },
+      { id: 'doc-2', name: 'ルール.md', mimeType: 'text/markdown', path: 'judgement' },
+      // ショートカット経由のファイル(id は実体、shortcutId はショートカット自体 — v0.11)
+      { id: 'doc-3', name: 'リンク文書.md', mimeType: 'text/markdown', path: '', shortcutId: 'sc-3' },
+    ],
+    unresolvedShortcuts: [],
+  });
   mocks.ensureSubfolder.mockReset().mockResolvedValue('target-folder');
   mocks.upsertTextFile.mockReset().mockResolvedValue({ fileId: 'file-new', action: 'created' });
+  mocks.upsertFile.mockReset().mockResolvedValue({ fileId: 'file-new', action: 'created' });
   mocks.trashFile.mockReset().mockResolvedValue(undefined);
   mocks.getIdTokenFor.mockReset().mockResolvedValue('id-token');
 });
@@ -119,13 +134,22 @@ describe('ファイル名の検証(normalizeKnowledgeFileName)', () => {
     expect(normalizeKnowledgeFileName('  notes  ')).toBe('notes.md');
   });
 
-  it('.md / .txt はそのまま受け入れる', () => {
+  it('.md / .txt / .pdf はそのまま受け入れる', () => {
     expect(normalizeKnowledgeFileName('decision-rules.md')).toBe('decision-rules.md');
     expect(normalizeKnowledgeFileName('memo_01.txt')).toBe('memo_01.txt');
+    expect(normalizeKnowledgeFileName('取引基準.pdf')).toBe('取引基準.pdf');
   });
 
-  it('規約外(大文字・日本語・空白・スラッシュ・空)は AIM-6004(400)', () => {
-    for (const bad of ['Readme.md', 'メモ.md', 'a b.md', 'a/b.md', "it's.md", '']) {
+  it('日本語・空白・記号を含む名前を許容し、英大文字は小文字へ寄せる(v0.11)', () => {
+    expect(normalizeKnowledgeFileName('メモ.md')).toBe('メモ.md');
+    expect(normalizeKnowledgeFileName('Web-EDIの運用.md')).toBe('web-ediの運用.md');
+    expect(normalizeKnowledgeFileName('a b.md')).toBe('a b.md');
+    expect(normalizeKnowledgeFileName("it's.md")).toBe("it's.md");
+    expect(normalizeKnowledgeFileName('Readme.MD')).toBe('readme.md');
+  });
+
+  it('規約外(スラッシュ・制御文字・空・拡張子のみ)は AIM-6004(400)', () => {
+    for (const bad of ['a/b.md', 'a\\b.md', 'bad\u0000name.md', '', '.md', '.pdf']) {
       expect(() => normalizeKnowledgeFileName(bad)).toThrowError(
         expect.objectContaining({ code: ERROR_CODES.ADMIN_INPUT_INVALID, status: 400 }),
       );
@@ -197,6 +221,25 @@ describe('ナレッジページの描画', () => {
     expect(out).toContain('>今すぐ同期</button>');
   });
 
+  it('同期対象フォルダへの導線(Drive リンク)を表示する(v0.11: 設定ずれの自己診断)', async () => {
+    process.env['KNOWLEDGE_DRIVE_FOLDER_ID'] = 'root-folder';
+    const out = (await renderAdminKnowledge(stubPool(), adminCtx())).html;
+    expect(out).toContain('https://drive.google.com/drive/folders/root-folder');
+    expect(out).toContain('この一覧に表示されないファイルは同期されません');
+  });
+
+  it('アクセスできないショートカットは警告バナーで可視化する(v0.11)', async () => {
+    process.env['KNOWLEDGE_DRIVE_FOLDER_ID'] = 'root-folder';
+    mocks.listFilesRecursive.mockResolvedValue({
+      files: [],
+      unresolvedShortcuts: [{ name: 'shimamura', path: 'customer' }],
+    });
+    const out = (await renderAdminKnowledge(stubPool(), adminCtx())).html;
+    expect(out).toContain('ショートカット先にアクセスできない');
+    expect(out).toContain('customer/shimamura');
+    expect(out).toContain('共有権限を引き継ぎません');
+  });
+
   it('Drive 一覧の取得失敗は 500 にせずページ内のエラー表示に留める(原則4)', async () => {
     process.env['KNOWLEDGE_DRIVE_FOLDER_ID'] = 'root-folder';
     mocks.listFilesRecursive.mockRejectedValue(new Error('drive down'));
@@ -217,18 +260,32 @@ describe('ナレッジページの描画', () => {
 
   it('アップロード結果のフラッシュ(?uploaded=1)は件数と規約適合の失敗ファイル名のみ表示する(受け入れ基準1)', async () => {
     process.env['KNOWLEDGE_DRIVE_FOLDER_ID'] = 'root-folder';
-    const failedNames = encodeURIComponent('b.md,<img>.md,大文字.txt');
+    // JSON 配列で受け渡す(v0.11: 日本語名対応)。規約違反(パス区切り)は表示しない
+    const failedNames = encodeURIComponent(JSON.stringify(['b.md', '<img>.md', '日本語名.txt', 'bad/name.md']));
     const out = (
       await renderAdminKnowledge(
         stubPool(),
-        adminCtx(`?uploaded=1&created=2&updated=1&failed=2&failed_names=${failedNames}`),
+        adminCtx(`?uploaded=1&created=2&updated=1&failed=3&failed_names=${failedNames}`),
       )
     ).html;
-    expect(out).toContain('新規 2 件・上書き 1 件・失敗 2 件');
-    // 失敗ファイル名はファイル名規約に一致するもののみ表示(クエリ偽装による表示注入の防止)
+    expect(out).toContain('新規 2 件・上書き 1 件・失敗 3 件');
     expect(out).toContain('失敗したファイル: b.md');
+    expect(out).toContain('日本語名.txt');
+    // HTML はエスケープされ、パス区切り入りの偽装名は表示されない
     expect(out).not.toContain('<img>');
-    expect(out).not.toContain('大文字');
+    expect(out).not.toContain('bad/name.md');
+  });
+
+  it('failed_names が JSON でない(旧形式・偽装)場合はファイル名を表示しない', async () => {
+    process.env['KNOWLEDGE_DRIVE_FOLDER_ID'] = 'root-folder';
+    const out = (
+      await renderAdminKnowledge(
+        stubPool(),
+        adminCtx(`?uploaded=1&created=0&updated=0&failed=1&failed_names=${encodeURIComponent('b.md,c.md')}`),
+      )
+    ).html;
+    expect(out).toContain('失敗 1 件');
+    expect(out).not.toContain('失敗したファイル');
   });
 
   it('アップロードフォーム(ファイル・複数)と直接入力フォームの両方を表示する', async () => {
@@ -263,7 +320,7 @@ describe('ナレッジ書込ハンドラ(POST)', () => {
       viewer,
       uploadForm({ target: 'judgement', file_name: 'decision-rules', content: '# 判断基準' }),
     );
-    expect(location).toBe('/admin/knowledge?saved=created');
+    expect(location).toBe('/admin/knowledge?saved=created#upload-direct');
     expect(mocks.ensureSubfolder).toHaveBeenCalledWith('root-folder', 'judgement');
     expect(mocks.upsertTextFile).toHaveBeenCalledWith('target-folder', 'decision-rules.md', '# 判断基準');
   });
@@ -278,7 +335,7 @@ describe('ナレッジ書込ハンドラ(POST)', () => {
     );
     assertCallsValid(captured);
     expect(captured[0]?.text).toContain('ops.industries');
-    expect(location).toBe('/admin/knowledge?saved=created');
+    expect(location).toBe('/admin/knowledge?saved=created#upload-direct');
     expect(mocks.ensureSubfolder).toHaveBeenCalledWith('root-folder', 'domain', 'retail');
   });
 
@@ -290,7 +347,7 @@ describe('ナレッジ書込ハンドラ(POST)', () => {
       viewer,
       uploadForm({ target: 'customer', customer_id: 'acme', file_name: 'profile.md', content: '更新' }),
     );
-    expect(location).toBe('/admin/knowledge?saved=updated');
+    expect(location).toBe('/admin/knowledge?saved=updated#upload-direct');
     expect(mocks.ensureSubfolder).toHaveBeenCalledWith('root-folder', 'customer', 'acme');
   });
 
@@ -314,7 +371,9 @@ describe('ナレッジ書込ハンドラ(POST)', () => {
     process.env['KNOWLEDGE_DRIVE_FOLDER_ID'] = 'root-folder';
     const cases: URLSearchParams[] = [
       uploadForm({ target: 'root', file_name: 'a.md', content: 'x' }),
-      uploadForm({ target: 'judgement', file_name: '不正な名前.md', content: 'x' }),
+      uploadForm({ target: 'judgement', file_name: 'パス/入り.md', content: 'x' }),
+      // 直接入力はテキスト前提のため .pdf 名は保存不可(PDF はファイルアップロードから)
+      uploadForm({ target: 'judgement', file_name: '資料.pdf', content: 'x' }),
       uploadForm({ target: 'judgement', file_name: 'a.md', content: '   ' }),
       uploadForm({ target: 'judgement', file_name: 'a.md', content: 'x'.repeat(200 * 1024 + 1) }),
     ];
@@ -337,6 +396,16 @@ describe('ナレッジ書込ハンドラ(POST)', () => {
     );
     expect(location).toBe('/admin/knowledge?saved=deleted');
     expect(mocks.trashFile).toHaveBeenCalledWith('doc-1');
+  });
+
+  it('delete: ショートカット経由のファイルはショートカット側をゴミ箱へ移動する(実体は残す — v0.11)', async () => {
+    process.env['KNOWLEDGE_DRIVE_FOLDER_ID'] = 'root-folder';
+    await handleAdminKnowledgePost(
+      stubPool(),
+      viewer,
+      new URLSearchParams({ action: 'delete', file_id: 'doc-3', file_name: 'リンク文書.md' }),
+    );
+    expect(mocks.trashFile).toHaveBeenCalledWith('sc-3');
   });
 
   it('delete: 形式不正なファイルIDは AIM-6004(400)で Drive に触れない', async () => {
@@ -432,28 +501,65 @@ describe('ナレッジ書込ハンドラ: ファイルアップロード(upload_
   });
 
   it('複数ファイルを同じ格納先へ upsert し、新規・上書きの件数を PRG で渡す(受け入れ基準1)', async () => {
-    mocks.upsertTextFile
+    mocks.upsertFile
       .mockResolvedValueOnce({ fileId: 'f1', action: 'created' })
       .mockResolvedValueOnce({ fileId: 'f2', action: 'updated' });
     const location = await handleAdminKnowledgePost(stubPool(), viewer, filesForm(), [
       file('a.md', '# A'),
       file('b.txt', 'B'),
     ]);
-    expect(location).toBe('/admin/knowledge?uploaded=1&created=1&updated=1&failed=0');
+    expect(location).toBe('/admin/knowledge?uploaded=1&created=1&updated=1&failed=0#upload-files');
     expect(mocks.ensureSubfolder).toHaveBeenCalledTimes(1);
     expect(mocks.ensureSubfolder).toHaveBeenCalledWith('root-folder', 'judgement');
-    expect(mocks.upsertTextFile).toHaveBeenNthCalledWith(1, 'target-folder', 'a.md', '# A');
-    expect(mocks.upsertTextFile).toHaveBeenNthCalledWith(2, 'target-folder', 'b.txt', 'B');
+    expect(mocks.upsertFile).toHaveBeenNthCalledWith(1, 'target-folder', 'a.md', '# A', 'text/markdown');
+    expect(mocks.upsertFile).toHaveBeenNthCalledWith(2, 'target-folder', 'b.txt', 'B', 'text/markdown');
   });
 
-  it('ファイル名は小文字に変換して保存する(OS 由来の大文字を規約へ寄せる)', async () => {
-    await handleAdminKnowledgePost(stubPool(), viewer, filesForm(), [file('README.MD', 'x')]);
-    expect(mocks.upsertTextFile).toHaveBeenCalledWith('target-folder', 'readme.md', 'x');
+  it('日本語ファイル名はそのまま投入でき、英大文字は小文字に変換して保存する(v0.11)', async () => {
+    await handleAdminKnowledgePost(stubPool(), viewer, filesForm(), [
+      file('PB商品生産工場の認定.md', 'x'),
+      file('README.MD', 'y'),
+    ]);
+    expect(mocks.upsertFile).toHaveBeenNthCalledWith(
+      1,
+      'target-folder',
+      'pb商品生産工場の認定.md',
+      'x',
+      'text/markdown',
+    );
+    expect(mocks.upsertFile).toHaveBeenNthCalledWith(2, 'target-folder', 'readme.md', 'y', 'text/markdown');
   });
 
   it('前後空白付きのファイル名は trim して受理する(拡張子判定の前に行う)', async () => {
     await handleAdminKnowledgePost(stubPool(), viewer, filesForm(), [file('notes.md ', 'x')]);
-    expect(mocks.upsertTextFile).toHaveBeenCalledWith('target-folder', 'notes.md', 'x');
+    expect(mocks.upsertFile).toHaveBeenCalledWith('target-folder', 'notes.md', 'x', 'text/markdown');
+  });
+
+  it('PDF はバイナリのまま application/pdf で投入する(v0.11)', async () => {
+    const pdfBytes = Buffer.concat([Buffer.from('%PDF-1.7\n'), Buffer.alloc(64, 0x20)]);
+    await handleAdminKnowledgePost(stubPool(), viewer, filesForm(), [file('取引基準.pdf', pdfBytes)]);
+    expect(mocks.upsertFile).toHaveBeenCalledWith('target-folder', '取引基準.pdf', pdfBytes, 'application/pdf');
+  });
+
+  it('3MB 超の PDF は AIM-6004(400)で何も保存しない', async () => {
+    const big = Buffer.concat([Buffer.from('%PDF-1.7'), Buffer.alloc(3 * 1024 * 1024, 0x20)]);
+    await expectAppErrorAsync(
+      () => handleAdminKnowledgePost(stubPool(), viewer, filesForm(), [file('big.pdf', big)]),
+      ERROR_CODES.ADMIN_INPUT_INVALID,
+      400,
+      '3MB',
+    );
+    expect(mocks.upsertFile).not.toHaveBeenCalled();
+  });
+
+  it('PDF 形式でない .pdf(マジックバイト不一致)は AIM-6004(400)', async () => {
+    await expectAppErrorAsync(
+      () => handleAdminKnowledgePost(stubPool(), viewer, filesForm(), [file('fake.pdf', 'ただのテキスト')]),
+      ERROR_CODES.ADMIN_INPUT_INVALID,
+      400,
+      'PDF ファイルとして読み取れません',
+    );
+    expect(mocks.upsertFile).not.toHaveBeenCalled();
   });
 
   it('ファイル未選択は AIM-6004(400)', async () => {
@@ -476,7 +582,7 @@ describe('ナレッジ書込ハンドラ: ファイルアップロード(upload_
     expect(mocks.upsertTextFile).not.toHaveBeenCalled();
   });
 
-  it('拡張子 .md / .txt 以外は .md 自動付与で素通りさせず AIM-6004(400)', async () => {
+  it('拡張子 .md / .txt / .pdf 以外は .md 自動付与で素通りさせず AIM-6004(400)', async () => {
     for (const bad of ['data.json', 'index.html', 'archive.tar.gz', 'readme']) {
       await expectAppErrorAsync(
         () => handleAdminKnowledgePost(stubPool(), viewer, filesForm(), [file(bad, 'x')]),
@@ -485,22 +591,22 @@ describe('ナレッジ書込ハンドラ: ファイルアップロード(upload_
         '対応していない形式',
       );
     }
-    expect(mocks.upsertTextFile).not.toHaveBeenCalled();
+    expect(mocks.upsertFile).not.toHaveBeenCalled();
   });
 
-  it('規約外のファイル名が1件でもあれば全件投入しない(受け入れ基準2)', async () => {
+  it('規約外のファイル名(パス区切り入り)が1件でもあれば全件投入しない(受け入れ基準2)', async () => {
     await expectAppErrorAsync(
       () =>
         handleAdminKnowledgePost(stubPool(), viewer, filesForm(), [
           file('ok.md', 'x'),
-          file('日本語名.md', 'x'),
+          file('パス/入り.md', 'x'),
         ]),
       ERROR_CODES.ADMIN_INPUT_INVALID,
       400,
-      '日本語名.md',
+      'パス/入り.md',
     );
     expect(mocks.ensureSubfolder).not.toHaveBeenCalled();
-    expect(mocks.upsertTextFile).not.toHaveBeenCalled();
+    expect(mocks.upsertFile).not.toHaveBeenCalled();
   });
 
   it('小文字変換後の重複名は AIM-6004(400)', async () => {
@@ -560,26 +666,28 @@ describe('ナレッジ書込ハンドラ: ファイルアップロード(upload_
       400,
       '存在しない業界',
     );
-    expect(mocks.upsertTextFile).not.toHaveBeenCalled();
+    expect(mocks.upsertFile).not.toHaveBeenCalled();
   });
 
-  it('2件目以降の保存失敗は継続し、失敗件数とファイル名を PRG で渡す(原則4)', async () => {
-    mocks.upsertTextFile
+  it('2件目以降の保存失敗は継続し、失敗件数とファイル名(JSON)を PRG で渡す(原則4)', async () => {
+    mocks.upsertFile
       .mockResolvedValueOnce({ fileId: 'f1', action: 'created' })
       .mockRejectedValueOnce(new Error('drive down'))
       .mockResolvedValueOnce({ fileId: 'f3', action: 'created' });
     const location = await handleAdminKnowledgePost(stubPool(), viewer, filesForm(), [
       file('a.md', 'x'),
-      file('b.md', 'y'),
+      file('失敗する.md', 'y'),
       file('c.md', 'z'),
     ]);
     expect(location).toBe(
-      `/admin/knowledge?uploaded=1&created=2&updated=0&failed=1&failed_names=${encodeURIComponent('b.md')}`,
+      `/admin/knowledge?uploaded=1&created=2&updated=0&failed=1&failed_names=${encodeURIComponent(
+        JSON.stringify(['失敗する.md']),
+      )}#upload-files`,
     );
   });
 
   it('1件目からの保存失敗は設定不備の可能性が高いためそのままエラー表示にする(v0.6 §2)', async () => {
-    mocks.upsertTextFile.mockRejectedValue(
+    mocks.upsertFile.mockRejectedValue(
       new AppError(ERROR_CODES.DRIVE_WRITE_FAILED, '編集者共有を確認してください', { status: 502 }),
     );
     await expectAppErrorAsync(
@@ -588,6 +696,6 @@ describe('ナレッジ書込ハンドラ: ファイルアップロード(upload_
       ERROR_CODES.DRIVE_WRITE_FAILED,
       502,
     );
-    expect(mocks.upsertTextFile).toHaveBeenCalledTimes(1);
+    expect(mocks.upsertFile).toHaveBeenCalledTimes(1);
   });
 });
