@@ -55,7 +55,7 @@ function stubPool(
     currentOwnerId?: string | null;
   } = {},
 ): pg.Pool {
-  return {
+  const base = {
     query: (text: string, params?: unknown[]) => {
       captured.push({ text, params: params ?? [] });
       // update 前の現在値取得と担当者検証は、書込失敗のシミュレーションの対象外とする
@@ -84,6 +84,11 @@ function stubPool(
         rowCount: isPrecheck ? rows.length : (behavior.rowCount ?? rows.length),
       });
     },
+  };
+  // withTransaction(タスク進捗更新)用: 同じ捕捉クエリを使うクライアントを貸し出す
+  return {
+    ...base,
+    connect: () => Promise.resolve({ query: base.query, release: () => undefined }),
   } as unknown as pg.Pool;
 }
 
@@ -145,6 +150,60 @@ describe('プロジェクト管理ページの描画', () => {
     expect(out).toContain('プロジェクトの編集: a-sha-si');
     expect(out).toContain('value="A社SI"');
     expect(out).toContain('action" value="update"');
+    // 計画情報の任意項目(v0.10)
+    expect(out).toContain('name="objective"');
+    expect(out).toContain('name="description"');
+  });
+
+  it('編集モードではマイルストーンとタスク進捗のセクションを表示する(v0.10)', async () => {
+    const captured: CapturedCall[] = [];
+    const pool = {
+      query: (text: string, params?: unknown[]) => {
+        captured.push({ text, params: params ?? [] });
+        const rows = text.includes('FROM ops.project_milestones')
+          ? [
+              { milestone_id: '1', title: '要件確定', due_date: '2026-07-20', status: 'planned' },
+              { milestone_id: '2', title: 'キックオフ', due_date: '2026-07-01', status: 'done' },
+            ]
+          : text.includes('FROM ops.tasks t')
+            ? [
+                {
+                  task_id: '7',
+                  title: 'A社の棚卸し',
+                  status: 'in_progress',
+                  due_date: '2026-07-15',
+                  assignee_name: '田中',
+                },
+              ]
+            : text.includes('FROM ops.projects p')
+              ? projectRows
+              : text.includes('FROM ops.customers')
+                ? [{ customer_id: 'a-sha', name: 'A社' }]
+                : text.includes('FROM ops.users')
+                  ? [{ user_id: 'admin1', display_name: '山下' }]
+                  : [];
+        return Promise.resolve({ rows, rowCount: rows.length });
+      },
+    } as unknown as pg.Pool;
+
+    const out = (await renderAdminProjects(pool, adminCtx('?edit=a-sha-si'))).html;
+
+    // マイルストーンはプロジェクト ID で絞って取得する(混同防止)
+    const milestoneQuery = captured.find((c) => c.text.includes('FROM ops.project_milestones'));
+    expect(milestoneQuery?.params).toEqual(['a-sha-si']);
+    const taskQuery = captured.find((c) => c.text.includes('FROM ops.tasks t'));
+    expect(taskQuery?.params).toEqual(['a-sha-si']);
+
+    expect(out).toContain('マイルストーン: A社SI');
+    expect(out).toContain('要件確定');
+    expect(out).toContain('完了にする'); // planned → done のトグル
+    expect(out).toContain('未完了に戻す'); // done → planned のトグル
+    expect(out).toContain('action" value="add_milestone"');
+    expect(out).toContain('タスクと進捗: A社SI');
+    expect(out).toContain('A社の棚卸し');
+    expect(out).toContain('action" value="update_task_status"');
+    // タスクの起票は M3(Chat)が SoT である旨の案内
+    expect(out).toContain('Chat のタスク指示');
   });
 
   it('プロジェクト未登録なら空メッセージを表示する', async () => {
@@ -176,7 +235,17 @@ describe('プロジェクト管理の書込ハンドラ(POST)', () => {
     const location = await handleAdminProjectsPost(stubPool(captured), viewer, createForm());
 
     const insert = captured.find((c) => c.text.includes('INSERT INTO ops.projects'));
-    expect(insert?.params).toEqual(['b-sha-saas', 'B社SaaS', 'a-sha', 'saas', 'active', 20, 'admin1']);
+    expect(insert?.params).toEqual([
+      'b-sha-saas',
+      'B社SaaS',
+      'a-sha',
+      'saas',
+      'active',
+      20,
+      'admin1',
+      null, // objective(任意・未入力)
+      null, // description(任意・未入力)
+    ]);
     expect(location).toBe('/admin/projects?saved=created');
   });
 
@@ -347,6 +416,192 @@ describe('プロジェクト管理の書込ハンドラ(POST)', () => {
   it('不明な action は AIM-6004(400)', async () => {
     await expectAppErrorAsync(
       () => handleAdminProjectsPost(stubPool(), viewer, new URLSearchParams({ action: 'drop' })),
+      ERROR_CODES.ADMIN_INPUT_INVALID,
+      400,
+    );
+  });
+});
+
+describe('マイルストーン管理(POST・v0.10)', () => {
+  it('add_milestone: プロジェクトに紐づけて INSERT し、編集画面へ PRG で戻る', async () => {
+    const captured: CapturedCall[] = [];
+    const location = await handleAdminProjectsPost(
+      stubPool(captured),
+      viewer,
+      new URLSearchParams({
+        action: 'add_milestone',
+        project_id: 'a-sha-si',
+        title: '要件確定',
+        due_date: '2026-07-20',
+      }),
+    );
+    const insert = captured.find((c) => c.text.includes('INSERT INTO ops.project_milestones'));
+    expect(insert?.params).toEqual(['a-sha-si', '要件確定', '2026-07-20']);
+    expect(location).toBe('/admin/projects?edit=a-sha-si&saved=created');
+  });
+
+  it('add_milestone: 期日は任意(空なら NULL)。不正な日付形式は AIM-6004(400)', async () => {
+    const captured: CapturedCall[] = [];
+    await handleAdminProjectsPost(
+      stubPool(captured),
+      viewer,
+      new URLSearchParams({ action: 'add_milestone', project_id: 'a-sha-si', title: 'β公開' }),
+    );
+    const insert = captured.find((c) => c.text.includes('INSERT INTO ops.project_milestones'));
+    expect(insert?.params?.[2]).toBeNull();
+
+    await expectAppErrorAsync(
+      () =>
+        handleAdminProjectsPost(
+          stubPool(),
+          viewer,
+          new URLSearchParams({
+            action: 'add_milestone',
+            project_id: 'a-sha-si',
+            title: 'β公開',
+            due_date: '7月20日',
+          }),
+        ),
+      ERROR_CODES.ADMIN_INPUT_INVALID,
+      400,
+      'YYYY-MM-DD',
+    );
+  });
+
+  it('toggle_milestone / delete_milestone: project_id を条件に含め、他プロジェクトの操作を拒否する(混同防止)', async () => {
+    const captured: CapturedCall[] = [];
+    await handleAdminProjectsPost(
+      stubPool(captured, { rowCount: 1 }),
+      viewer,
+      new URLSearchParams({
+        action: 'toggle_milestone',
+        project_id: 'a-sha-si',
+        milestone_id: '1',
+        status: 'done',
+      }),
+    );
+    const update = captured.find((c) => c.text.includes('UPDATE ops.project_milestones'));
+    expect(update?.text).toContain('milestone_id = $1 AND project_id = $2');
+    expect(update?.params).toEqual(['1', 'a-sha-si', 'done']);
+
+    // 他プロジェクトのマイルストーン(WHERE 不一致 → rowCount=0)は 400
+    await expectAppErrorAsync(
+      () =>
+        handleAdminProjectsPost(
+          stubPool([], { rowCount: 0 }),
+          viewer,
+          new URLSearchParams({
+            action: 'delete_milestone',
+            project_id: 'another-project',
+            milestone_id: '1',
+          }),
+        ),
+      ERROR_CODES.ADMIN_INPUT_INVALID,
+      400,
+      '見つかりません',
+    );
+  });
+
+  it('toggle_milestone: 状態は planned/done のみ許可する', async () => {
+    await expectAppErrorAsync(
+      () =>
+        handleAdminProjectsPost(
+          stubPool(),
+          viewer,
+          new URLSearchParams({
+            action: 'toggle_milestone',
+            project_id: 'a-sha-si',
+            milestone_id: '1',
+            status: 'cancelled',
+          }),
+        ),
+      ERROR_CODES.ADMIN_INPUT_INVALID,
+      400,
+    );
+  });
+});
+
+describe('タスク進捗の更新(POST・v0.10)', () => {
+  function taskPool(
+    captured: CapturedCall[],
+    behavior: { currentTaskStatus?: string; taskFound?: boolean } = {},
+  ): pg.Pool {
+    const run = (text: string, params?: unknown[]): Promise<unknown> => {
+      captured.push({ text, params: params ?? [] });
+      const rows = text.includes('SELECT status FROM ops.tasks')
+        ? behavior.taskFound === false
+          ? []
+          : [{ status: behavior.currentTaskStatus ?? 'in_progress' }]
+        : [];
+      return Promise.resolve({ rows, rowCount: rows.length === 0 ? 1 : rows.length });
+    };
+    return {
+      query: run,
+      connect: () => Promise.resolve({ query: run, release: () => undefined }),
+    } as unknown as pg.Pool;
+  }
+
+  const statusForm = (over: Record<string, string> = {}): URLSearchParams =>
+    new URLSearchParams({
+      action: 'update_task_status',
+      project_id: 'a-sha-si',
+      task_id: '7',
+      status: 'done',
+      ...over,
+    });
+
+  it('状態を更新し、遷移を task_status_log(changed_via=admin)へ同一トランザクションで記録する', async () => {
+    const captured: CapturedCall[] = [];
+    const location = await handleAdminProjectsPost(taskPool(captured), viewer, statusForm());
+
+    // project_id を条件に含めて対象タスクをロックする(混同防止)
+    const select = captured.find((c) => c.text.includes('SELECT status FROM ops.tasks'));
+    expect(select?.text).toContain('task_id = $1 AND project_id = $2');
+    expect(select?.text).toContain('FOR UPDATE');
+    expect(select?.params).toEqual(['7', 'a-sha-si']);
+
+    const update = captured.find((c) => c.text.includes('UPDATE ops.tasks'));
+    expect(update?.params).toEqual(['7', 'done']);
+    expect(update?.text).toContain(`CASE WHEN $2 = 'done' THEN now() ELSE NULL END`);
+
+    const log = captured.find((c) => c.text.includes('INSERT INTO ops.task_status_log'));
+    expect(log?.params).toEqual(['7', 'in_progress', 'done']);
+    expect(log?.text).toContain(`'admin'`);
+
+    // BEGIN → SELECT → UPDATE → INSERT → COMMIT の順(SoT 書込と履歴が同一トランザクション)
+    const beginIdx = captured.findIndex((c) => c.text === 'BEGIN');
+    const commitIdx = captured.findIndex((c) => c.text === 'COMMIT');
+    expect(beginIdx).toBeGreaterThan(-1);
+    expect(commitIdx).toBeGreaterThan(captured.findIndex((c) => c.text.includes('task_status_log')));
+
+    expect(location).toBe('/admin/projects?edit=a-sha-si&saved=updated');
+  });
+
+  it('同一状態への更新は no-op(履歴を汚さない・冪等)', async () => {
+    const captured: CapturedCall[] = [];
+    await handleAdminProjectsPost(
+      taskPool(captured, { currentTaskStatus: 'done' }),
+      viewer,
+      statusForm(),
+    );
+    expect(captured.find((c) => c.text.includes('UPDATE ops.tasks'))).toBeUndefined();
+    expect(captured.find((c) => c.text.includes('task_status_log'))).toBeUndefined();
+  });
+
+  it('別プロジェクトのタスク(不一致)は AIM-6004(400)で更新しない', async () => {
+    const captured: CapturedCall[] = [];
+    await expectAppErrorAsync(
+      () => handleAdminProjectsPost(taskPool(captured, { taskFound: false }), viewer, statusForm()),
+      ERROR_CODES.ADMIN_INPUT_INVALID,
+      400,
+      '見つかりません',
+    );
+    expect(captured.find((c) => c.text.includes('UPDATE ops.tasks'))).toBeUndefined();
+  });
+
+  it('不正な状態値は AIM-6004(400)', async () => {
+    await expectAppErrorAsync(
+      () => handleAdminProjectsPost(taskPool([]), viewer, statusForm({ status: 'paused' })),
       ERROR_CODES.ADMIN_INPUT_INVALID,
       400,
     );

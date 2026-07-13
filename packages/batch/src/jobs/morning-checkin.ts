@@ -1,4 +1,5 @@
 import {
+  fetchProjectContextForUser,
   generateContent,
   isJstWeekday,
   jstDateString,
@@ -123,6 +124,10 @@ export async function runMorningCheckin(pool: pg.Pool): Promise<JobSummary> {
       const calendarText = await fetchTodayEventsText(member.email);
       const calendarBlock =
         calendarText === undefined ? '' : `\n本日の予定:\n${calendarText}`;
+      // プロジェクトの計画情報(v0.10 §4.1。任意項目のため該当なしなら省略。内部で非ブロッキング)
+      const projectContext = await fetchProjectContextForUser(pool, member.user_id);
+      const projectBlock =
+        projectContext === undefined ? '' : `\nプロジェクト文脈:\n${projectContext}`;
 
       let messageText: string;
       let modelUsed: string | undefined;
@@ -136,7 +141,7 @@ export async function runMorningCheckin(pool: pg.Pool): Promise<JobSummary> {
           messages: [
             {
               role: 'user',
-              text: `メンバー: ${member.display_name}\n本日のタスク状況:\n${tasksSummary}${calendarBlock}`,
+              text: `メンバー: ${member.display_name}\n本日のタスク状況:\n${tasksSummary}${calendarBlock}${projectBlock}`,
             },
           ],
         });

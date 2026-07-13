@@ -104,6 +104,8 @@ export function statusBadge(status: string): Raw {
       return badge('進行中', 'ok');
     case 'closed':
       return badge('終了', 'muted');
+    case 'planned':
+      return badge('予定', 'muted');
     default:
       return badge(status, 'muted');
   }

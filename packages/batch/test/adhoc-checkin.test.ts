@@ -105,6 +105,34 @@ describe('runAdhocCheckin(管理者発火の状況確認)', () => {
     expect(call.messages[0]?.text).toContain('田中');
   });
 
+  it('プロジェクト文脈(目的・マイルストーン)があれば配信文面の生成に供給する(v0.10)', async () => {
+    const { pool } = createMockPool((text, params) => {
+      if (text.includes('GROUP BY p.project_id')) return { rows: [{ project_id: 'p1' }] };
+      if (text.includes('FROM ops.projects p')) {
+        return {
+          rows: [
+            {
+              project_id: 'p1',
+              name: 'A社SI',
+              customer_name: 'A社',
+              objective: '基幹システムの刷新',
+              description: null,
+            },
+          ],
+        };
+      }
+      if (text.includes('FROM ops.project_milestones')) return { rows: [] };
+      return baseResponder(text, params) ?? { rows: [] };
+    });
+    await runAdhocCheckin(pool, { userId: 'member1' });
+
+    const call = mocks.generateContent.mock.calls[0]?.[0] as {
+      messages: Array<{ role: string; text: string }>;
+    };
+    expect(call.messages[0]?.text).toContain('プロジェクト文脈:');
+    expect(call.messages[0]?.text).toContain('基幹システムの刷新');
+  });
+
   it('個別モード: userId 指定はその1名のみに配信する(SQL に user_id 条件が付く)', async () => {
     const { pool, calls } = createMockPool(baseResponder);
     const summary = await runAdhocCheckin(pool, { userId: 'member1' });
