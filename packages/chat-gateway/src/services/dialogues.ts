@@ -137,6 +137,10 @@ export interface AppendTurnsUpdate {
  * WHERE 句は dialogue_id のみ(IDENTITY で一意)。created_at を条件に含めると、
  * node-postgres の timestamptz 丸め(µs→ms)により等値比較が恒常的に不成立となり
  * 0行更新のサイレント障害になるため使用しない。
+ * 数値パラメータには明示キャストが必須: `COALESCE($8, 0)` のようにリテラル 0 と並べると
+ * PostgreSQL はパラメータを integer と推論し、小数のコスト値("0.0003247")のパースが
+ * 22P02 で失敗する(列型 NUMERIC は COALESCE の型解決に関与しない)。
+ * INSERT(createDialogue)は列型から推論されるためキャスト不要という非対称に注意。
  */
 export async function appendTurns(
   pool: pg.Pool,
@@ -151,9 +155,9 @@ export async function appendTurns(
        hypothesis = COALESCE($3::jsonb, hypothesis),
        review = COALESCE($4::jsonb, review),
        model_used = COALESCE($5, model_used),
-       input_tokens = COALESCE(input_tokens, 0) + COALESCE($6, 0),
-       output_tokens = COALESCE(output_tokens, 0) + COALESCE($7, 0),
-       cost_usd = COALESCE(cost_usd, 0) + COALESCE($8, 0)
+       input_tokens = COALESCE(input_tokens, 0) + COALESCE($6::int, 0),
+       output_tokens = COALESCE(output_tokens, 0) + COALESCE($7::int, 0),
+       cost_usd = COALESCE(cost_usd, 0) + COALESCE($8::numeric, 0)
      WHERE dialogue_id = $1`,
     [
       dialogue.dialogue_id,

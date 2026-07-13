@@ -89,6 +89,15 @@ describe('状況確認(adhoc_checkin)への返信の継続(v0.5)', () => {
     expect(update?.params[0]).toBe('55');
     expect(String(update?.params[1])).toContain('A社の資料は半分まで進みました');
     expect(response.text).toContain('詰まっている点はありますか');
+
+    // 数値パラメータの明示キャスト(回帰防止): COALESCE($8, 0) はリテラル 0 との型解決で
+    // パラメータが integer と推論され、小数のコスト値が 22P02(invalid input syntax for
+    // type integer)で失敗する — 2026-07-13 の返信エラーインシデントの根本原因。
+    // モックプールは型推論を検証できないため、SQL 上のキャストを静的に固定する
+    expect(update?.text).toContain('COALESCE($6::int, 0)');
+    expect(update?.text).toContain('COALESCE($7::int, 0)');
+    expect(update?.text).toContain('COALESCE($8::numeric, 0)');
+    expect(update?.params[7]).toBe(0.001); // 小数コストがそのまま渡ることの確認
   });
 
   it('findOpenDialogue は adhoc_checkin をターン数上限つきで返信待ちとして拾う', async () => {
