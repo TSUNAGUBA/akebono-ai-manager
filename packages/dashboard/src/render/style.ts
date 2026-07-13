@@ -95,7 +95,8 @@ a:hover { text-decoration: underline; }
 .page-title { font-size: 22px; font-weight: 700; margin: 0 0 4px; }
 .page-desc { color: var(--text-muted); font-size: 14px; margin: 0 0 24px; }
 
-.section { margin-top: 32px; scroll-margin-top: 64px; }
+/* scroll-margin はヘッダー(sticky ~50px)+結果バナー(sticky ~56px)の分を確保する */
+.section { margin-top: 32px; scroll-margin-top: 124px; }
 .section > h2 { font-size: 16px; font-weight: 700; margin: 0 0 4px; }
 .section > .section-desc { color: var(--text-muted); font-size: 13px; margin: 0 0 12px; }
 

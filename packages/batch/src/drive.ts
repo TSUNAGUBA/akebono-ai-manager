@@ -37,6 +37,18 @@ export async function fetchFileText(file: DriveFile): Promise<string | undefined
     return res.text();
   }
   if (file.mimeType === PDF_MIME || file.name.toLowerCase().endsWith('.pdf')) {
+    // サイズ判定は**ダウンロード前**に列挙メタデータ(size)で行う(巨大 PDF の
+    // 全量バッファリングによる OOM はファイル単位の try/catch でも救えないため)。
+    // size を取得できなかった場合に備え、ダウンロード後の判定も残す(二段構え)
+    if (file.size !== undefined && file.size > PDF_MAX_SYNC_BYTES) {
+      logger.warn('PDF がサイズ上限を超えるため同期をスキップします(ダウンロードしません)', {
+        docId: file.id,
+        name: file.name,
+        bytes: file.size,
+        maxBytes: PDF_MAX_SYNC_BYTES,
+      });
+      return undefined;
+    }
     const res = await driveFetch(`${DRIVE_API}/files/${file.id}?alt=media&supportsAllDrives=true`);
     const bytes = new Uint8Array(await res.arrayBuffer());
     if (bytes.byteLength > PDF_MAX_SYNC_BYTES) {

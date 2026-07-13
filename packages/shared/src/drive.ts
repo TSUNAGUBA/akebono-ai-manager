@@ -30,6 +30,8 @@ export interface DriveFile {
   path: string;
   /** Drive 側の最終更新日時(RFC3339)。一覧表示用の補助情報 */
   modifiedTime?: string;
+  /** バイト数。同期側のダウンロード前サイズ判定(PDF 上限)に使う。取得できない場合は undefined */
+  size?: number;
   /**
    * ショートカット経由で列挙されたファイルの、ショートカット自体の ID。
    * id はショートカット先(実体)を指す。ナレッジからの削除はショートカットを
@@ -44,6 +46,7 @@ export interface DriveFolderListing {
   /**
    * アクセスできなかったショートカット(先のフォルダが SA に共有されていない等)。
    * ショートカットは共有権限を引き継がないため、実体側の共有が必要(v0.11)。
+   * path は**親フォルダのパス**(ルート直下は '')— 表示側は path/name で結合する。
    * 同期側はこれが空でない場合、削除掃除をスキップして既存チャンクを保護する
    */
   unresolvedShortcuts: Array<{ name: string; path: string }>;
@@ -55,6 +58,8 @@ interface FilesListResponse {
     name?: string;
     mimeType?: string;
     modifiedTime?: string;
+    /** バイト数(Drive API は int64 を文字列で返す)。フォルダ・Google ドキュメントにはない */
+    size?: string;
     shortcutDetails?: { targetId?: string; targetMimeType?: string };
   }>;
   nextPageToken?: string;
@@ -84,8 +89,16 @@ type DriveChild = {
   name: string;
   mimeType: string;
   modifiedTime?: string;
+  size?: number;
   shortcutDetails?: { targetId?: string; targetMimeType?: string };
 };
+
+/** Drive API の size(int64 文字列)を number へ。欠落・非数値は undefined。 */
+function parseSize(size: string | undefined): number | undefined {
+  if (size === undefined || size === '') return undefined;
+  const value = Number(size);
+  return Number.isFinite(value) ? value : undefined;
+}
 
 async function listChildren(folderId: string): Promise<DriveChild[]> {
   const children: DriveChild[] = [];
@@ -93,7 +106,7 @@ async function listChildren(folderId: string): Promise<DriveChild[]> {
   do {
     const params = new URLSearchParams({
       q: `'${folderId}' in parents and trashed = false`,
-      fields: 'files(id,name,mimeType,modifiedTime,shortcutDetails),nextPageToken',
+      fields: 'files(id,name,mimeType,modifiedTime,size,shortcutDetails),nextPageToken',
       pageSize: '100',
       supportsAllDrives: 'true',
       includeItemsFromAllDrives: 'true',
@@ -108,6 +121,7 @@ async function listChildren(folderId: string): Promise<DriveChild[]> {
           name: f.name,
           mimeType: f.mimeType,
           modifiedTime: f.modifiedTime,
+          size: parseSize(f.size),
           shortcutDetails: f.shortcutDetails,
         });
       }
@@ -127,7 +141,9 @@ async function listChildren(folderId: string): Promise<DriveChild[]> {
 export async function listFilesRecursive(rootFolderId: string): Promise<DriveFolderListing> {
   const filesById = new Map<string, DriveFile>();
   const unresolvedShortcuts: DriveFolderListing['unresolvedShortcuts'] = [];
-  const queue: Array<{ id: string; path: string; viaShortcutName?: string }> = [
+  // viaShortcut はショートカット経由で積んだフォルダの出自(名前+親パス)。
+  // 列挙失敗時の unresolvedShortcuts は「親パス+名前」の契約で記録する(表示側が結合する)
+  const queue: Array<{ id: string; path: string; viaShortcut?: { name: string; parentPath: string } }> = [
     { id: rootFolderId, path: '' },
   ];
   const visited = new Set<string>();
@@ -141,8 +157,8 @@ export async function listFilesRecursive(rootFolderId: string): Promise<DriveFol
     try {
       children = await listChildren(current.id);
     } catch (err) {
-      if (current.viaShortcutName !== undefined) {
-        unresolvedShortcuts.push({ name: current.viaShortcutName, path: current.path });
+      if (current.viaShortcut !== undefined) {
+        unresolvedShortcuts.push({ name: current.viaShortcut.name, path: current.viaShortcut.parentPath });
         continue;
       }
       throw err;
@@ -156,10 +172,16 @@ export async function listFilesRecursive(rootFolderId: string): Promise<DriveFol
         if (targetId === undefined) {
           unresolvedShortcuts.push({ name: child.name, path: current.path });
         } else if (child.shortcutDetails?.targetMimeType === FOLDER_MIME) {
-          queue.push({ id: targetId, path: childPath, viaShortcutName: child.name });
+          queue.push({
+            id: targetId,
+            path: childPath,
+            viaShortcut: { name: child.name, parentPath: current.path },
+          });
         } else if (!filesById.has(targetId)) {
           // 同一実体が実体・ショートカットの両方で見える場合は実体を優先する
-          // (実体は下の分岐で無条件に set され、この登録を上書きする)
+          // (実体は下の分岐で無条件に set され、この登録を上書きする)。
+          // modifiedTime はショートカット自体の更新日時(実体の内容更新は反映されない —
+          // 表示上の補助情報に留まり、同期は content_hash 差分のため機能影響はない)
           filesById.set(targetId, {
             id: targetId,
             name: child.name,
@@ -176,6 +198,7 @@ export async function listFilesRecursive(rootFolderId: string): Promise<DriveFol
           mimeType: child.mimeType,
           path: current.path,
           modifiedTime: child.modifiedTime,
+          size: child.size,
         });
       }
     }
