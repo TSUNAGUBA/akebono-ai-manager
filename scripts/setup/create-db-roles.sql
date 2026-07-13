@@ -21,7 +21,8 @@ SELECT format('CREATE ROLE ai_manager_dashboard_ro LOGIN PASSWORD %L', :'dashboa
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ai_manager_dashboard_ro')
 \gexec
 
--- マスタ管理用(v0.3): ダッシュボードの管理者限定ページからのみ使用。マスタ表+顧客のみ書込可
+-- マスタ管理用(v0.3): ダッシュボードの管理者限定ページからのみ使用。
+-- マスタ表+顧客の書込可+ユーザーの問いかけ可否列のみ列単位で更新可(v0.8)
 SELECT format('CREATE ROLE ai_manager_admin_rw LOGIN PASSWORD %L', :'admin_rw_password')
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ai_manager_admin_rw')
 \gexec

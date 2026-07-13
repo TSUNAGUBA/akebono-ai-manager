@@ -14,7 +14,8 @@ import { memberTasksSummary, type JobSummary } from './morning-checkin.js';
 
 /**
  * ジョブパラメータ(要件 v0.5)。
- * userId 指定時はそのメンバー1名のみ、省略時は active な member 全員に配信する。
+ * userId 指定時はそのユーザー1名のみ、省略時は問いかけ可(checkin_enabled)の
+ * active なユーザー全員に配信する(v0.8 でロール固定から変更)。
  */
 export interface AdhocCheckinParams {
   userId?: string;
@@ -69,17 +70,17 @@ export async function runAdhocCheckin(
       ? await query<MemberRow>(
           pool,
           `SELECT user_id, display_name, email, chat_space_id
-           FROM ops.users WHERE active AND role = 'member'`,
+           FROM ops.users WHERE active AND checkin_enabled`,
         )
       : await query<MemberRow>(
           pool,
           `SELECT user_id, display_name, email, chat_space_id
-           FROM ops.users WHERE active AND role = 'member' AND user_id = $1`,
+           FROM ops.users WHERE active AND checkin_enabled AND user_id = $1`,
           [params.userId],
         );
   if (params.userId !== undefined && members.rows.length === 0) {
-    // 画面側でも実在検証するが、フォーム偽装・登録解除との競合に備えた防御(スキップとして報告)
-    logger.warn('指定ユーザーが active なメンバーに見つからないためスキップします', {
+    // 画面側でも実在検証するが、フォーム偽装・登録解除・可否変更との競合に備えた防御(スキップとして報告)
+    logger.warn('指定ユーザーが問いかけ可の active なユーザーに見つからないためスキップします', {
       userId: params.userId,
     });
     summary.skipped += 1;
