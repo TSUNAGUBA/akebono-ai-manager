@@ -125,7 +125,7 @@ export async function renderAdminIndustries(pool: pg.Pool, ctx: AdminPageContext
       table,
       '業界は直交する軸の組み合わせで表現します(複合業界値は作らない)。物理削除はせず「無効」で運用します',
     )}
-    ${section('業界の追加', createForm)}
+    ${section('業界の追加', createForm, undefined, 'create')}
   `;
 }
 
@@ -156,7 +156,8 @@ export async function handleAdminIndustriesPost(
       throw err;
     }
     auditLog(viewer, 'industry.create', { industryId }, { name, displayOrder, active });
-    return `${PATH}?saved=created`;
+    // アンカーで追加フォームへ戻る(連続追加時に最上部へ飛ばされない — v0.11)
+    return `${PATH}?saved=created#create`;
   }
 
   if (action === 'update') {

@@ -207,11 +207,11 @@ export async function renderAdminProjects(pool: pg.Pool, ctx: AdminPageContext):
       <input type="number" name="priority" value="${r?.priority ?? ''}" placeholder="例: 10(小さいほど優先)">
     </label>
     ${selectField('admin_owner_id', '担当管理者', ownerOptions(r), r?.admin_owner_id ?? null, '(未設定)')}
-    <label class="field">目的(任意)
-      <textarea name="objective" maxlength="2000" placeholder="このプロジェクトで何を達成するか">${r?.objective ?? ''}</textarea>
+    <label class="field field-full">目的(任意)
+      <textarea name="objective" rows="5" maxlength="2000" placeholder="このプロジェクトで何を達成するか">${r?.objective ?? ''}</textarea>
     </label>
-    <label class="field">内容(任意)
-      <textarea name="description" maxlength="2000" placeholder="プロジェクトの概要・スコープ">${r?.description ?? ''}</textarea>
+    <label class="field field-full">内容(任意)
+      <textarea name="description" rows="5" maxlength="2000" placeholder="プロジェクトの概要・スコープ">${r?.description ?? ''}</textarea>
     </label>
   `;
 
@@ -330,6 +330,7 @@ export async function renderAdminProjects(pool: pg.Pool, ctx: AdminPageContext):
       `マイルストーン: ${editing.name}`,
       html`${milestoneTable}${milestoneAddForm}`,
       'マイルストーンはこのプロジェクトにのみ属します(タスク・顧客とは独立)。登録すると AI の対話文脈に供給されます',
+      'milestones',
     );
 
     const taskStatusForm = (t: TaskRow): Raw => {
@@ -371,6 +372,7 @@ export async function renderAdminProjects(pool: pg.Pool, ctx: AdminPageContext):
       `タスクと進捗: ${editing.name}`,
       taskTable,
       'ここでは状態の更新のみ行えます(遷移は履歴に記録されます)。タスクの起票・題名・担当・期限の変更は Chat のタスク指示(M3 の承認フロー)から行ってください',
+      'tasks',
     );
   }
 
@@ -385,7 +387,7 @@ export async function renderAdminProjects(pool: pg.Pool, ctx: AdminPageContext):
       table,
       'タスクが参照するため物理削除はできません。終わったプロジェクトは状態を「終了」にします(終了にするとタスク指示の分解候補・朝の問いかけのタスク文脈から外れます)。行の「編集」から内容・目的・マイルストーン・タスク進捗を管理できます',
     )}
-    ${section('プロジェクトの追加', createForm)}
+    ${section('プロジェクトの追加', createForm, undefined, 'create')}
   `;
 }
 
@@ -502,7 +504,7 @@ export async function handleAdminProjectsPost(
       throw err;
     }
     auditLog(viewer, 'project.create', { projectId }, { ...fields });
-    return `${PATH}?saved=created`;
+    return `${PATH}?saved=created#create`;
   }
 
   if (action === 'update') {
@@ -583,7 +585,7 @@ export async function handleAdminProjectsPost(
       throw err;
     }
     auditLog(viewer, 'milestone.create', { projectId }, { title, dueDate });
-    return `${PATH}?edit=${encodeURIComponent(projectId)}&saved=created`;
+    return `${PATH}?edit=${encodeURIComponent(projectId)}&saved=created#milestones`;
   }
 
   if (action === 'toggle_milestone') {
@@ -603,7 +605,7 @@ export async function handleAdminProjectsPost(
       throw invalidInput('このプロジェクトのマイルストーンが見つかりません。ページを再読み込みしてやり直してください');
     }
     auditLog(viewer, 'milestone.toggle', { projectId, milestoneId }, { status });
-    return `${PATH}?edit=${encodeURIComponent(projectId)}&saved=updated`;
+    return `${PATH}?edit=${encodeURIComponent(projectId)}&saved=updated#milestones`;
   }
 
   if (action === 'delete_milestone') {
@@ -618,7 +620,7 @@ export async function handleAdminProjectsPost(
       throw invalidInput('このプロジェクトのマイルストーンが見つかりません。ページを再読み込みしてやり直してください');
     }
     auditLog(viewer, 'milestone.delete', { projectId, milestoneId }, {});
-    return `${PATH}?edit=${encodeURIComponent(projectId)}&saved=deleted`;
+    return `${PATH}?edit=${encodeURIComponent(projectId)}&saved=deleted#milestones`;
   }
 
   // ── タスク進捗の更新(v0.10 §3)─────────────────────────────
@@ -663,7 +665,7 @@ export async function handleAdminProjectsPost(
     if (statusFrom !== status) {
       auditLog(viewer, 'task.status_update', { projectId, taskId }, { statusFrom, statusTo: status });
     }
-    return `${PATH}?edit=${encodeURIComponent(projectId)}&saved=updated`;
+    return `${PATH}?edit=${encodeURIComponent(projectId)}&saved=updated#tasks`;
   }
 
   throw invalidInput('不明な操作です');

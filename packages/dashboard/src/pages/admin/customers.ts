@@ -127,15 +127,17 @@ export async function renderAdminCustomers(pool: pg.Pool, ctx: AdminPageContext)
              placeholder="例: しまむら、シマムラ">
     </label>
     <label class="field">ナレッジ Drive フォルダID
-      <input type="text" name="knowledge_drive_folder_id" value="${r?.knowledge_drive_folder_id ?? ''}" maxlength="500" placeholder="任意">
+      <input type="text" name="knowledge_drive_folder_id" value="${r?.knowledge_drive_folder_id ?? ''}" maxlength="500" placeholder="任意(参考情報)">
     </label>
-    <label class="field">メモ
-      <textarea name="notes" maxlength="500" placeholder="任意">${r?.notes ?? ''}</textarea>
+    <label class="field field-full">メモ
+      <textarea name="notes" rows="5" maxlength="500" placeholder="任意">${r?.notes ?? ''}</textarea>
     </label>
     <p class="form-help">
       エイリアスは質問文からの顧客特定に使う別名(各2文字以上)。名称に法人格(株式会社など)を
       含む場合、質問では通称で言及されるため、通称をエイリアスに登録してください
       (例: 名称「株式会社しまむら」→ エイリアス「しまむら」)。
+      ナレッジ Drive フォルダID は参考情報です — ナレッジ同期の対象は共通ナレッジフォルダ
+      (KNOWLEDGE_DRIVE_FOLDER_ID)配下の customer/{顧客ID}/ で、この欄では変わりません。
     </p>
   `;
 
@@ -183,7 +185,7 @@ export async function renderAdminCustomers(pool: pg.Pool, ctx: AdminPageContext)
     ${flashMessages(ctx)}
     ${editing === undefined ? html`` : section(`顧客の編集: ${editing.customer_id}`, editForm)}
     ${section('顧客一覧', table)}
-    ${section('顧客の追加', createForm)}
+    ${section('顧客の追加', createForm, undefined, 'create')}
   `;
 }
 
@@ -300,7 +302,8 @@ export async function handleAdminCustomersPost(
       { customerId },
       { name, notes, folderId, industryIds, primary, aliases },
     );
-    return `${PATH}?saved=created`;
+    // アンカーで追加フォームへ戻る(連続追加時に最上部へ飛ばされない — v0.11)
+    return `${PATH}?saved=created#create`;
   }
 
   if (action === 'update') {

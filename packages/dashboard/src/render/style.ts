@@ -95,7 +95,7 @@ a:hover { text-decoration: underline; }
 .page-title { font-size: 22px; font-weight: 700; margin: 0 0 4px; }
 .page-desc { color: var(--text-muted); font-size: 14px; margin: 0 0 24px; }
 
-.section { margin-top: 32px; }
+.section { margin-top: 32px; scroll-margin-top: 64px; }
 .section > h2 { font-size: 16px; font-weight: 700; margin: 0 0 4px; }
 .section > .section-desc { color: var(--text-muted); font-size: 13px; margin: 0 0 12px; }
 
@@ -216,6 +216,9 @@ a:hover { text-decoration: underline; }
 .alert { border-radius: var(--radius); font-size: 13.5px; padding: 10px 16px; margin: 0 0 16px; }
 .alert.ok { background: var(--ok-soft); color: var(--ok); }
 .alert.error { background: var(--danger-soft); color: var(--danger); }
+/* アンカー付きリダイレクトでページ中程に居ても結果バナーが視界に入るよう追従させる */
+.alert-stack { position: sticky; top: 58px; z-index: 9; display: grid; gap: 8px; margin: 0 0 16px; }
+.alert-stack .alert { margin: 0; box-shadow: var(--shadow); }
 
 /* ── フォーム(マスタ管理)── */
 .form .form-grid {
@@ -225,8 +228,11 @@ a:hover { text-decoration: underline; }
   margin-bottom: 14px;
 }
 .form label.field { display: block; font-size: 12.5px; color: var(--text-muted); }
+/* 日付・ファイル選択もテキスト入力と同じブロック表示に揃える(ラベルとの縦位置ずれの防止) */
 .form input[type="text"],
 .form input[type="number"],
+.form input[type="date"],
+.form input[type="file"],
 .form textarea,
 .form select {
   display: block;
@@ -244,7 +250,9 @@ a:hover { text-decoration: underline; }
   outline: 2px solid var(--accent-soft);
   border-color: var(--accent);
 }
-.form textarea { min-height: 72px; resize: vertical; }
+/* textarea は grid 内でも1行を占有し(field-full)、高さ固定・リサイズ不可・スクロール可 */
+.form textarea { resize: none; overflow-y: auto; }
+.form .form-grid .field-full { grid-column: 1 / -1; }
 .form .form-help { color: var(--text-muted); font-size: 12px; margin: 6px 0 0; }
 .form .readonly-id { font-weight: 600; margin-top: 4px; }
 .check-grid {
@@ -284,6 +292,8 @@ a:hover { text-decoration: underline; }
 /* ── モバイル ── */
 @media (max-width: 720px) {
   .container { padding: 20px 14px 48px; }
+  /* モバイルはヘッダーが折り返して高さが変わるため、バナーの追従(sticky)は行わない */
+  .alert-stack { position: static; }
   .rt table { display: none; }
   .rt { background: transparent; border: none; box-shadow: none; }
   .rt .rt-cards { display: grid; gap: 10px; }

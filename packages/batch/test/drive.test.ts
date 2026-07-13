@@ -1,5 +1,14 @@
-import { describe, expect, it } from 'vitest';
-import { classifyDocument } from '../src/drive.js';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { classifyDocument, fetchFileText } from '../src/drive.js';
+
+const mocks = vi.hoisted(() => ({
+  driveFetch: vi.fn<(url: string) => Promise<Response>>(),
+}));
+
+vi.mock('@ai-manager/shared', async (importOriginal) => {
+  const mod = await importOriginal<typeof import('@ai-manager/shared')>();
+  return { ...mod, driveFetch: mocks.driveFetch };
+});
 
 describe('classifyDocument(M1 標準フォーマット+v0.3 業界帰属)', () => {
   it('customer/{顧客ID}/profile.md → customer_profile', () => {
@@ -53,5 +62,68 @@ describe('classifyDocument(M1 標準フォーマット+v0.3 業界帰属)', () =
   it('フォーマット外はファイル名から推定し、既定は domain_ops', () => {
     expect(classifyDocument({ name: 'メモ.md', path: '' }).docType).toBe('domain_ops');
     expect(classifyDocument({ name: 'analogy集.md', path: '' }).docType).toBe('analogy');
+  });
+});
+
+/** テキスト層を持つ最小の1ページ PDF(本文: Hello TSUNAGUBA)。 */
+function minimalPdf(contentStream: string): Buffer {
+  return Buffer.from(
+    [
+      '%PDF-1.4',
+      '1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj',
+      '2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj',
+      '3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >> endobj',
+      `4 0 obj << /Length ${contentStream.length} >> stream`,
+      contentStream,
+      'endstream endobj',
+      '5 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj',
+      'xref',
+      '0 6',
+      'trailer << /Size 6 /Root 1 0 R >>',
+      '%%EOF',
+    ].join('\n'),
+    'latin1',
+  );
+}
+
+function pdfResponse(bytes: Buffer): Response {
+  return new Response(new Uint8Array(bytes), {
+    status: 200,
+    headers: { 'content-type': 'application/pdf' },
+  });
+}
+
+describe('fetchFileText: PDF のテキスト抽出(v0.11)', () => {
+  const pdfFile = { id: 'pdf-1', name: '取引基準.pdf', mimeType: 'application/pdf', path: 'customer/acme' };
+
+  beforeEach(() => {
+    mocks.driveFetch.mockReset();
+  });
+
+  it('テキスト層のある PDF は本文を抽出して返す(実 PDF での検証)', async () => {
+    mocks.driveFetch.mockResolvedValue(
+      pdfResponse(minimalPdf('BT /F1 24 Tf 72 700 Td (Hello TSUNAGUBA) Tj ET')),
+    );
+    const text = await fetchFileText(pdfFile);
+    expect(text).toContain('Hello TSUNAGUBA');
+    expect(mocks.driveFetch).toHaveBeenCalledWith(expect.stringContaining('/files/pdf-1?alt=media'));
+  });
+
+  it('テキスト層のない PDF(スキャン画像等)は undefined でスキップする', async () => {
+    mocks.driveFetch.mockResolvedValue(pdfResponse(minimalPdf('')));
+    await expect(fetchFileText(pdfFile)).resolves.toBeUndefined();
+  });
+
+  it('サイズ上限(20MB)を超える PDF は抽出せず undefined でスキップする', async () => {
+    mocks.driveFetch.mockResolvedValue(pdfResponse(Buffer.alloc(20 * 1024 * 1024 + 1, 0x20)));
+    await expect(fetchFileText(pdfFile)).resolves.toBeUndefined();
+  });
+
+  it('MIME が application/octet-stream でも拡張子 .pdf なら PDF として扱う', async () => {
+    mocks.driveFetch.mockResolvedValue(
+      pdfResponse(minimalPdf('BT /F1 12 Tf 72 700 Td (ext match) Tj ET')),
+    );
+    const text = await fetchFileText({ ...pdfFile, mimeType: 'application/octet-stream' });
+    expect(text).toContain('ext match');
   });
 });
