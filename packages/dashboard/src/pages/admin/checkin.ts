@@ -5,7 +5,7 @@ import { h, html, raw, type Raw } from '../../render/html.js';
 import type { Viewer } from '../../render/layout.js';
 import { invalidInput, requireRef } from '../../admin/form.js';
 import { triggerBatchJob } from './batch-trigger.js';
-import { adminTabs, csrfField, flashMessages, type AdminPageContext } from './common.js';
+import { adminTabs, csrfField, flashCount, flashMessages, type AdminPageContext } from './common.js';
 
 /**
  * 状況確認(要件 v0.5): active ユーザーの一覧+当日の対話状況を表示し、
@@ -48,14 +48,10 @@ const CHECKIN_ERROR_MESSAGES: Record<string, string> = {
 function checkinFlash(ctx: AdminPageContext): Raw {
   const params = ctx.url.searchParams;
   if (params.get('checkin') === '1') {
-    const count = (name: string): string => {
-      const value = params.get(name) ?? '';
-      return /^\d{1,6}$/.test(value) ? value : '0';
-    };
-    const failed = count('failed');
+    const failed = flashCount(params, 'failed');
     const tone = failed === '0' ? 'ok' : 'error';
     return raw(
-      `<div class="alert ${tone}">状況確認を送信しました(送信 ${count('sent')} 件・スキップ ${count('skipped')} 件・失敗 ${count('failed')} 件)。問いかけ不可のユーザーは対象外です。DM 未登録、または朝の問いかけ・振り返りに応答中のユーザーはスキップされます</div>`,
+      `<div class="alert ${tone}">状況確認を送信しました(送信 ${flashCount(params, 'sent')} 件・スキップ ${flashCount(params, 'skipped')} 件・失敗 ${failed} 件)。問いかけ不可のユーザーは対象外です。DM 未登録、または朝の問いかけ・振り返りに応答中のユーザーはスキップされます</div>`,
     );
   }
   const errorKey = params.get('checkin_error');

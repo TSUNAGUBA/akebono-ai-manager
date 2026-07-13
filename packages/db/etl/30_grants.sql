@@ -14,7 +14,7 @@ BEGIN
     -- パーティションは後から追加されるためデフォルト権限も設定
     ALTER DEFAULT PRIVILEGES IN SCHEMA ops GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ai_manager_app_rw;
     ALTER DEFAULT PRIVILEGES IN SCHEMA rag GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ai_manager_app_rw;
-    -- 集計の手動実行(v0.12 §5): dwh 表への直接権限は与えず、SECURITY DEFINER の
+    -- 集計の手動実行(v0.12 §6): dwh 表への直接権限は与えず、SECURITY DEFINER の
     -- ETL 関数の実行のみを許可する(20_daily_etl.sql で PUBLIC から REVOKE 済み)
     GRANT USAGE ON SCHEMA dwh TO ai_manager_app_rw;
     GRANT EXECUTE ON FUNCTION dwh.run_daily_etl(DATE) TO ai_manager_app_rw;
@@ -75,7 +75,7 @@ BEGIN
     GRANT SELECT (user_id, display_name, role, active, chat_space_id, checkin_enabled)
       ON ops.users TO ai_manager_admin_rw;
     GRANT UPDATE (checkin_enabled) ON ops.users TO ai_manager_admin_rw;
-    -- 対話ログ確認ページ(v0.12 §6 /admin/dialogues)用の参照。
+    -- 対話ログ確認ページ(v0.12 §7 /admin/dialogues)用の参照。
     -- 「閲覧ロール(ai_manager_dashboard_ro)は生の対話ログを読めない」境界(要件 7.5)は
     -- 維持し、管理者限定ページ専用の書込ロール側にのみ SELECT を付与する
     -- (ページはアプリ層でも管理者限定 — 二重制御)。書込は付与しない

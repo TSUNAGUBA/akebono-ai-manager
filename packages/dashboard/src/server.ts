@@ -24,7 +24,10 @@ import { renderWorkload } from './pages/workload.js';
 import { renderAdminUnconfigured, type AdminPageContext } from './pages/admin/common.js';
 import { handleAdminCheckinPost, renderAdminCheckin } from './pages/admin/checkin.js';
 import { handleAdminCustomersPost, renderAdminCustomers } from './pages/admin/customers.js';
+import { handleAdminDialoguesPost, renderAdminDialogues } from './pages/admin/dialogues.js';
+import { handleAdminEscalationsPost, renderAdminEscalations } from './pages/admin/escalations.js';
 import { handleAdminIndustriesPost, renderAdminIndustries } from './pages/admin/industries.js';
+import { handleAdminJobsPost, renderAdminJobs } from './pages/admin/jobs.js';
 import { handleAdminKnowledgePost, renderAdminKnowledge } from './pages/admin/knowledge.js';
 import { handleAdminProjectsPost, renderAdminProjects } from './pages/admin/projects.js';
 import { handleAdminRelationsPost, renderAdminRelations } from './pages/admin/relations.js';
@@ -161,6 +164,36 @@ const ADMIN_PAGES: AdminPageDef[] = [
     pool: 'readonly',
     render: renderAdminCheckin,
     handlePost: handleAdminCheckinPost,
+  },
+  {
+    path: '/admin/escalations',
+    title: 'エスカレーション',
+    description:
+      'AI からのエスカレーションの一覧と解決(メンバーへの回答送信・裁定の記録・回答不要)。解決の記録・送信・ナレッジ還流は batch 経由(v0.12 §3)',
+    // 一覧は閲覧ロールの SELECT(ops.escalations / ops.users)で完結し、
+    // 書込・Chat 送信は batch の escalation-action ジョブに委譲する(dashboard に権限を持たせない)
+    pool: 'readonly',
+    render: renderAdminEscalations,
+    handlePost: handleAdminEscalationsPost,
+  },
+  {
+    path: '/admin/dialogues',
+    title: '対話ログ',
+    description:
+      'メンバーと AI の対話ログの確認と、誤った AI 回答へのフィードバック(お詫びと訂正は AI が本人へ送信 — v0.12 §7)',
+    // 生の対話ログは管理ロール(ai_manager_admin_rw)のみ SELECT 可のため admin プール必須
+    // (既定 = pool 未指定。未構成時は renderAdminUnconfigured の案内になる)
+    render: renderAdminDialogues,
+    handlePost: handleAdminDialoguesPost,
+  },
+  {
+    path: '/admin/jobs',
+    title: 'ジョブ実行',
+    description:
+      '定時ジョブの手動実行(いずれも再実行で既存データが巻き戻らない設計。起動は batch 経由 — v0.12 §6)',
+    pool: 'readonly',
+    render: renderAdminJobs,
+    handlePost: handleAdminJobsPost,
   },
 ];
 

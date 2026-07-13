@@ -69,22 +69,32 @@ export async function fetchFileText(file: DriveFile): Promise<string | undefined
   return undefined;
 }
 
-export type DocType = 'customer_profile' | 'glossary' | 'domain_ops' | 'decision_rules' | 'analogy';
+export type DocType =
+  | 'customer_profile'
+  | 'glossary'
+  | 'domain_ops'
+  | 'decision_rules'
+  | 'analogy'
+  | 'project_doc';
 
 export interface DocClassification {
   docType: DocType;
   customerId: string | null;
   /** domain/{業界}/ の {業界} セグメント。マスタとの突合は knowledge-sync 側で行う(v0.3 §3.4) */
   industryId: string | null;
+  /** project/{プロジェクトID}/ の {プロジェクトID} セグメント。マスタとの突合は knowledge-sync 側で行う(v0.12 §4) */
+  projectId: string | null;
 }
 
 /**
- * フォルダパスとファイル名から doc_type / customer_id / industry_id を決める(要件 M1+v0.3 §3.4)。
- *   customer/{顧客ID}/profile.md   → customer_profile
- *   customer/{顧客ID}/glossary.md  → glossary
- *   domain/{業界}/operations.md    → domain_ops(業界は ops.industries の industry_id)
- *   judgement/decision-rules.md    → decision_rules
- *   judgement/analogy-library.md   → analogy
+ * フォルダパスとファイル名から doc_type / customer_id / industry_id / project_id を
+ * 決める(要件 M1+v0.3 §3.4+v0.12 §4)。
+ *   customer/{顧客ID}/profile.md       → customer_profile
+ *   customer/{顧客ID}/glossary.md      → glossary
+ *   domain/{業界}/operations.md        → domain_ops(業界は ops.industries の industry_id)
+ *   judgement/decision-rules.md        → decision_rules
+ *   judgement/analogy-library.md       → analogy
+ *   project/{プロジェクトID}/*.md      → project_doc(ops.projects の project_id)
  */
 export function classifyDocument(file: Pick<DriveFile, 'name' | 'path'>): DocClassification {
   const segments = file.path === '' ? [] : file.path.split('/');
@@ -97,6 +107,7 @@ export function classifyDocument(file: Pick<DriveFile, 'name' | 'path'>): DocCla
       docType: name.includes('glossary') ? 'glossary' : 'customer_profile',
       customerId,
       industryId: null,
+      projectId: null,
     };
   }
   if (top === 'judgement') {
@@ -104,15 +115,22 @@ export function classifyDocument(file: Pick<DriveFile, 'name' | 'path'>): DocCla
       docType: name.includes('analogy') ? 'analogy' : 'decision_rules',
       customerId: null,
       industryId: null,
+      projectId: null,
     };
   }
   if (top === 'domain') {
-    return { docType: 'domain_ops', customerId: null, industryId: segments[1] ?? null };
+    return { docType: 'domain_ops', customerId: null, industryId: segments[1] ?? null, projectId: null };
+  }
+  if (top === 'project') {
+    // プロジェクト固有ナレッジ(v0.12 §4)。domain と同様、直下(ID セグメントなし)は帰属なし
+    return { docType: 'project_doc', customerId: null, industryId: null, projectId: segments[1] ?? null };
   }
   // ルート直下などフォーマット外: ファイル名から推定し、既定はドメイン知識
-  if (name.includes('analogy')) return { docType: 'analogy', customerId: null, industryId: null };
+  if (name.includes('analogy'))
+    return { docType: 'analogy', customerId: null, industryId: null, projectId: null };
   if (name.includes('decision'))
-    return { docType: 'decision_rules', customerId: null, industryId: null };
-  if (name.includes('glossary')) return { docType: 'glossary', customerId: null, industryId: null };
-  return { docType: 'domain_ops', customerId: null, industryId: null };
+    return { docType: 'decision_rules', customerId: null, industryId: null, projectId: null };
+  if (name.includes('glossary'))
+    return { docType: 'glossary', customerId: null, industryId: null, projectId: null };
+  return { docType: 'domain_ops', customerId: null, industryId: null, projectId: null };
 }

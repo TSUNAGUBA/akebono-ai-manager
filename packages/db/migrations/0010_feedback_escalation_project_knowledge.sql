@@ -29,7 +29,7 @@ ALTER TABLE ops.dialogues
 INSERT INTO dwh.dim_dialogue_type (dialogue_type) VALUES ('feedback_correction')
 ON CONFLICT (dialogue_type) DO NOTHING;
 
--- 3) 対話フィードバック(v0.12 §6)。
+-- 3) 対話フィードバック(v0.12 §7)。
 --    SoT はこのテーブル。rag.knowledge_chunks の doc_id='feedback/{id}' チャンクは
 --    ここからの還流キャッシュ(ADR-11 の裁定還流と同じパターン)。
 --    ops.dialogues は複合 PK(dialogue_id, created_at)のパーティション表のため

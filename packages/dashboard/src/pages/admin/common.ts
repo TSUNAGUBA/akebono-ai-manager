@@ -21,6 +21,9 @@ export function adminTabs(activePath: string): Raw {
     { path: '/admin/users', label: 'ユーザー' },
     { path: '/admin/knowledge', label: 'ナレッジ' },
     { path: '/admin/checkin', label: '状況確認' },
+    { path: '/admin/escalations', label: 'エスカレーション' },
+    { path: '/admin/dialogues', label: '対話ログ' },
+    { path: '/admin/jobs', label: 'ジョブ実行' },
   ];
   const links = tabs
     .map(
@@ -64,6 +67,16 @@ export function flashMessages(ctx: AdminPageContext, ...extra: Raw[]): Raw {
 /** 全 POST フォーム必須の CSRF hidden input。 */
 export function csrfField(ctx: AdminPageContext): Raw {
   return html`<input type="hidden" name="${CSRF_FIELD}" value="${ctx.csrfToken}">`;
+}
+
+/**
+ * PRG クエリで受け渡す JobSummary の件数(sent/skipped/failed)の検証つき取り出し。
+ * クエリ偽装による表示注入を防ぐため、数値(6桁以内)以外は 0 に丸める
+ * (状況確認・ナレッジ同期・v0.12 の各ページで共通)。
+ */
+export function flashCount(params: URLSearchParams, name: string): string {
+  const value = params.get(name) ?? '';
+  return /^\d{1,6}$/.test(value) ? value : '0';
 }
 
 /** 有効/無効のバッジ表現(業界・関係種別マスタ共通)。 */

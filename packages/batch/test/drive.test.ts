@@ -10,12 +10,13 @@ vi.mock('@ai-manager/shared', async (importOriginal) => {
   return { ...mod, driveFetch: mocks.driveFetch };
 });
 
-describe('classifyDocument(M1 標準フォーマット+v0.3 業界帰属)', () => {
+describe('classifyDocument(M1 標準フォーマット+v0.3 業界帰属+v0.12 プロジェクト帰属)', () => {
   it('customer/{顧客ID}/profile.md → customer_profile', () => {
     expect(classifyDocument({ name: 'profile.md', path: 'customer/acme' })).toEqual({
       docType: 'customer_profile',
       customerId: 'acme',
       industryId: null,
+      projectId: null,
     });
   });
 
@@ -24,6 +25,7 @@ describe('classifyDocument(M1 標準フォーマット+v0.3 業界帰属)', () =
       docType: 'glossary',
       customerId: 'acme',
       industryId: null,
+      projectId: null,
     });
   });
 
@@ -32,6 +34,7 @@ describe('classifyDocument(M1 標準フォーマット+v0.3 業界帰属)', () =
       docType: 'domain_ops',
       customerId: null,
       industryId: 'logistics',
+      projectId: null,
     });
   });
 
@@ -40,6 +43,7 @@ describe('classifyDocument(M1 標準フォーマット+v0.3 業界帰属)', () =
       docType: 'domain_ops',
       customerId: null,
       industryId: null,
+      projectId: null,
     });
   });
 
@@ -48,6 +52,7 @@ describe('classifyDocument(M1 標準フォーマット+v0.3 業界帰属)', () =
       docType: 'decision_rules',
       customerId: null,
       industryId: null,
+      projectId: null,
     });
   });
 
@@ -56,6 +61,25 @@ describe('classifyDocument(M1 標準フォーマット+v0.3 業界帰属)', () =
       docType: 'analogy',
       customerId: null,
       industryId: null,
+      projectId: null,
+    });
+  });
+
+  it('project/{プロジェクトID}/*.md → project_doc+プロジェクト帰属(v0.12 §4)', () => {
+    expect(classifyDocument({ name: 'plan.md', path: 'project/p1' })).toEqual({
+      docType: 'project_doc',
+      customerId: null,
+      industryId: null,
+      projectId: 'p1',
+    });
+  });
+
+  it('project 直下(ID セグメントなし)は projectId null(domain と同じ扱い)', () => {
+    expect(classifyDocument({ name: '共通.md', path: 'project' })).toEqual({
+      docType: 'project_doc',
+      customerId: null,
+      industryId: null,
+      projectId: null,
     });
   });
 

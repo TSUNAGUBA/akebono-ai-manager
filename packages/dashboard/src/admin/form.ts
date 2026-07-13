@@ -51,6 +51,26 @@ export function requireRef(form: URLSearchParams, field: string, label: string):
   return value;
 }
 
+/**
+ * 数値 ID(BIGINT 列の識別子)。requireRef は長さしか検証しないため、
+ * 非数値が PG の 22P02(→ 500)に落ちる前に 400 で弾く
+ * (プロジェクトのマイルストーン・タスク、エスカレーション、対話 ID 等で共用)。
+ */
+export function requireNumericId(form: URLSearchParams, field: string, label: string): string {
+  const value = requireRef(form, field, label);
+  if (!/^\d+$/.test(value)) {
+    throw invalidInput(`${label}の指定が不正です。ページを再読み込みしてやり直してください`);
+  }
+  return value;
+}
+
+/** YYYY-MM-DD 形式かつカレンダー上実在する日付か(2026-02-31 等を 500 にせず 400 で弾く)。 */
+export function isRealDateString(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const date = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
+
 /** 新規作成時の識別子(^[a-z0-9_-]+$)。URL・フォルダ規約に使われるため厳格に検証する。 */
 export function requireId(form: URLSearchParams, field: string, label: string): string {
   const value = requireRef(form, field, label);
