@@ -26,6 +26,7 @@ import { handleAdminCheckinPost, renderAdminCheckin } from './pages/admin/checki
 import { handleAdminCustomersPost, renderAdminCustomers } from './pages/admin/customers.js';
 import { handleAdminIndustriesPost, renderAdminIndustries } from './pages/admin/industries.js';
 import { handleAdminKnowledgePost, renderAdminKnowledge } from './pages/admin/knowledge.js';
+import { handleAdminProjectsPost, renderAdminProjects } from './pages/admin/projects.js';
 import { handleAdminRelationsPost, renderAdminRelations } from './pages/admin/relations.js';
 import { handleAdminUsersPost, renderAdminUsers } from './pages/admin/users.js';
 import type { Raw } from './render/html.js';
@@ -128,6 +129,14 @@ const ADMIN_PAGES: AdminPageDef[] = [
     description: '顧客間関係(有向)の一覧・追加・削除と関係種別マスタの管理',
     render: renderAdminRelations,
     handlePost: handleAdminRelationsPost,
+  },
+  {
+    path: '/admin/projects',
+    title: 'マスタ管理: プロジェクト',
+    description:
+      'プロジェクトの一覧・追加・編集(物理削除はせず状態「終了」で運用。タスク・分析から参照される)',
+    render: renderAdminProjects,
+    handlePost: handleAdminProjectsPost,
   },
   {
     path: '/admin/users',

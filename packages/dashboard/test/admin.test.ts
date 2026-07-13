@@ -391,6 +391,55 @@ describe('マスタ管理の書込ハンドラ', () => {
     );
   });
 
+  it('customers: 2文字未満のエイリアスは AIM-6004(400)で保存しない(過剰一致防止)', async () => {
+    const form = new URLSearchParams({
+      action: 'create',
+      customer_id: 'c1',
+      name: '顧客',
+      primary_industry: 'retail',
+      aliases: 'あ',
+    });
+    form.append('industries', 'retail');
+    await expectAppErrorAsync(
+      () => handleAdminCustomersPost(stubPool(), viewer, form),
+      ERROR_CODES.ADMIN_INPUT_INVALID,
+      400,
+      '2文字以上',
+    );
+  });
+
+  it('customers: エイリアスは正規化(読点/カンマ区切り・trim・重複排除)して洗い替え保存する(v0.9)', async () => {
+    const captured: Array<{ text: string; params: unknown[] }> = [];
+    const capture = (text: string, params?: unknown[]): Promise<unknown> => {
+      captured.push({ text, params: params ?? [] });
+      return Promise.resolve({ rows: [], rowCount: 1 });
+    };
+    const pool = {
+      query: capture,
+      connect: () => Promise.resolve({ query: capture, release: () => undefined }),
+    } as unknown as pg.Pool;
+
+    const form = new URLSearchParams({
+      action: 'update',
+      customer_id: 'shimamura',
+      name: '株式会社しまむら',
+      primary_industry: 'retail',
+      aliases: 'しまむら、 シマムラ ,しまむら,島村',
+    });
+    form.append('industries', 'retail');
+
+    const location = await handleAdminCustomersPost(pool, viewer, form);
+    expect(location).toBe('/admin/customers?saved=updated');
+
+    const deleteIdx = captured.findIndex((c) => c.text.includes('DELETE FROM ops.customer_aliases'));
+    const insertIdx = captured.findIndex((c) => c.text.includes('INSERT INTO ops.customer_aliases'));
+    expect(deleteIdx).toBeGreaterThan(-1);
+    expect(insertIdx).toBeGreaterThan(deleteIdx); // 洗い替え: DELETE → INSERT
+    expect(captured[deleteIdx]?.params).toEqual(['shimamura']);
+    // 読点・半角カンマ・全角カンマ(IME 入力)のいずれも区切りとして扱う
+    expect(captured[insertIdx]?.params).toEqual(['shimamura', ['しまむら', 'シマムラ', '島村']]);
+  });
+
   it('relations: update_type 対象が存在しない(rowCount=0)場合は AIM-6004(400・見つかりません)', async () => {
     await expectAppErrorAsync(
       () =>

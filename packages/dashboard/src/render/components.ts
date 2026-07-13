@@ -100,6 +100,10 @@ export function statusBadge(status: string): Raw {
       return badge('未対応', 'warn');
     case 'resolved':
       return badge('対応済み', 'ok');
+    case 'active':
+      return badge('進行中', 'ok');
+    case 'closed':
+      return badge('終了', 'muted');
     default:
       return badge(status, 'muted');
   }

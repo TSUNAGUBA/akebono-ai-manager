@@ -25,6 +25,7 @@ interface CustomerRow {
   knowledge_drive_folder_id: string | null;
   industry_ids: string[];
   primary_industry: string | null;
+  aliases: string[];
 }
 
 interface IndustryOption {
@@ -47,7 +48,10 @@ export async function renderAdminCustomers(pool: pg.Pool, ctx: AdminPageContext)
     `SELECT c.customer_id, c.name, c.notes, c.knowledge_drive_folder_id,
             COALESCE(array_agg(ci.industry_id ORDER BY ci.industry_id)
                      FILTER (WHERE ci.industry_id IS NOT NULL), '{}') AS industry_ids,
-            (array_agg(ci.industry_id) FILTER (WHERE ci.is_primary))[1] AS primary_industry
+            (array_agg(ci.industry_id) FILTER (WHERE ci.is_primary))[1] AS primary_industry,
+            COALESCE((SELECT array_agg(a.alias ORDER BY a.alias)
+                        FROM ops.customer_aliases a
+                       WHERE a.customer_id = c.customer_id), '{}') AS aliases
      FROM ops.customers c
      LEFT JOIN ops.customer_industries ci ON ci.customer_id = c.customer_id
      GROUP BY c.customer_id, c.name, c.notes, c.knowledge_drive_folder_id
@@ -70,6 +74,7 @@ export async function renderAdminCustomers(pool: pg.Pool, ctx: AdminPageContext)
     [
       { key: 'id', label: '顧客ID' },
       { key: 'name', label: '名称' },
+      { key: 'aliases', label: 'エイリアス' },
       { key: 'industries', label: '所属業界(★=主業界)' },
       { key: 'folder', label: 'ナレッジフォルダ' },
       { key: 'ops', label: '操作' },
@@ -77,6 +82,7 @@ export async function renderAdminCustomers(pool: pg.Pool, ctx: AdminPageContext)
     customers.rows.map((r) => ({
       id: r.customer_id,
       name: r.name,
+      aliases: r.aliases.length === 0 ? '—' : r.aliases.join('、'),
       industries:
         r.industry_ids.length === 0
           ? '—'
@@ -116,12 +122,21 @@ export async function renderAdminCustomers(pool: pg.Pool, ctx: AdminPageContext)
     <label class="field">名称
       <input type="text" name="name" value="${r?.name ?? ''}" required maxlength="500" placeholder="例: 株式会社しまむら">
     </label>
+    <label class="field">エイリアス(読点・カンマ区切り)
+      <input type="text" name="aliases" value="${(r?.aliases ?? []).join('、')}" maxlength="500"
+             placeholder="例: しまむら、シマムラ">
+    </label>
     <label class="field">ナレッジ Drive フォルダID
       <input type="text" name="knowledge_drive_folder_id" value="${r?.knowledge_drive_folder_id ?? ''}" maxlength="500" placeholder="任意">
     </label>
     <label class="field">メモ
       <textarea name="notes" maxlength="500" placeholder="任意">${r?.notes ?? ''}</textarea>
     </label>
+    <p class="form-help">
+      エイリアスは質問文からの顧客特定に使う別名(各2文字以上)。名称に法人格(株式会社など)を
+      含む場合、質問では通称で言及されるため、通称をエイリアスに登録してください
+      (例: 名称「株式会社しまむら」→ エイリアス「しまむら」)。
+    </p>
   `;
 
   const editForm =
@@ -191,6 +206,42 @@ function parseIndustrySelection(form: URLSearchParams): { industryIds: string[];
   return { industryIds, primary };
 }
 
+/**
+ * フォームからエイリアスを取り出して検証する(v0.9 §4)。
+ * 読点・カンマ(全角含む)区切り → trim → 空要素除去 → 重複排除。各エイリアスは 2 文字以上
+ * (1文字は照合の過剰一致防止のため DDL の CHECK でも拒否される)。
+ * 文字数はコードポイントで数える(DDL の length() と同じ基準。サロゲートペア文字を
+ * JS の .length で 2 と誤判定して CHECK 違反 → 500 になるのを防ぐ)。
+ */
+function parseAliases(form: URLSearchParams): string[] {
+  const rawValue = form.get('aliases') ?? '';
+  if (rawValue.length > 500) throw invalidInput('エイリアスが長すぎます(全体で500文字以内)');
+  const aliases = [...new Set(rawValue.split(/[、,,]/).map((v) => v.trim()))].filter(
+    (v) => v !== '',
+  );
+  for (const alias of aliases) {
+    if ([...alias].length < 2) {
+      throw invalidInput(`エイリアス「${alias}」が短すぎます(2文字以上で指定してください)`);
+    }
+  }
+  return aliases;
+}
+
+/** エイリアス(customer_aliases)を単一 INSERT で書き込む(create / update 共通)。 */
+async function insertCustomerAliases(
+  client: pg.PoolClient,
+  customerId: string,
+  aliases: readonly string[],
+): Promise<void> {
+  if (aliases.length === 0) return;
+  await query(
+    client,
+    `INSERT INTO ops.customer_aliases (customer_id, alias)
+     SELECT $1, alias FROM unnest($2::text[]) AS t(alias)`,
+    [customerId, aliases],
+  );
+}
+
 /** 所属業界(customer_industries)を単一 INSERT で書き込む(create / update 共通)。 */
 async function insertCustomerIndustries(
   client: pg.PoolClient,
@@ -221,6 +272,7 @@ export async function handleAdminCustomersPost(
     const notes = optionalText(form, 'notes', 'メモ');
     const folderId = optionalText(form, 'knowledge_drive_folder_id', 'ナレッジ Drive フォルダID');
     const { industryIds, primary } = parseIndustrySelection(form);
+    const aliases = parseAliases(form);
     try {
       await withTransaction(pool, async (client) => {
         // 旧 industry 列(NOT NULL・互換用キャッシュ)には主業界を書く(SoT は customer_industries)
@@ -231,6 +283,7 @@ export async function handleAdminCustomersPost(
           [customerId, name, primary, notes, folderId],
         );
         await insertCustomerIndustries(client, customerId, industryIds, primary);
+        await insertCustomerAliases(client, customerId, aliases);
       });
     } catch (err) {
       if (hasPgCode(err, PG_UNIQUE_VIOLATION)) {
@@ -241,7 +294,12 @@ export async function handleAdminCustomersPost(
       }
       throw err;
     }
-    auditLog(viewer, 'customer.create', { customerId }, { name, notes, folderId, industryIds, primary });
+    auditLog(
+      viewer,
+      'customer.create',
+      { customerId },
+      { name, notes, folderId, industryIds, primary, aliases },
+    );
     return `${PATH}?saved=created`;
   }
 
@@ -252,6 +310,7 @@ export async function handleAdminCustomersPost(
     const notes = optionalText(form, 'notes', 'メモ');
     const folderId = optionalText(form, 'knowledge_drive_folder_id', 'ナレッジ Drive フォルダID');
     const { industryIds, primary } = parseIndustrySelection(form);
+    const aliases = parseAliases(form);
     try {
       await withTransaction(pool, async (client) => {
         const updated = await query(
@@ -264,9 +323,11 @@ export async function handleAdminCustomersPost(
         if ((updated.rowCount ?? 0) === 0) {
           throw invalidInput(`顧客「${customerId}」が見つかりません`);
         }
-        // 所属業界は洗い替え(DELETE + INSERT)。同一トランザクション内のため中間状態は見えない
+        // 所属業界・エイリアスは洗い替え(DELETE + INSERT)。同一トランザクション内のため中間状態は見えない
         await query(client, `DELETE FROM ops.customer_industries WHERE customer_id = $1`, [customerId]);
         await insertCustomerIndustries(client, customerId, industryIds, primary);
+        await query(client, `DELETE FROM ops.customer_aliases WHERE customer_id = $1`, [customerId]);
+        await insertCustomerAliases(client, customerId, aliases);
       });
     } catch (err) {
       if (hasPgCode(err, PG_FOREIGN_KEY_VIOLATION)) {
@@ -274,7 +335,12 @@ export async function handleAdminCustomersPost(
       }
       throw err;
     }
-    auditLog(viewer, 'customer.update', { customerId }, { name, notes, folderId, industryIds, primary });
+    auditLog(
+      viewer,
+      'customer.update',
+      { customerId },
+      { name, notes, folderId, industryIds, primary, aliases },
+    );
     return `${PATH}?saved=updated`;
   }
 

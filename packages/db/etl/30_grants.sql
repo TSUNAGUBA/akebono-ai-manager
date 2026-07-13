@@ -25,7 +25,8 @@ BEGIN
     GRANT SELECT ON ops.users, ops.customers, ops.projects, ops.tasks,
                     ops.task_status_log, ops.suggestions, ops.escalations, ops.reports,
                     ops.v_dialogue_daily_stats,
-                    ops.industries, ops.customer_industries, ops.relation_types, ops.customer_relations
+                    ops.industries, ops.customer_industries, ops.relation_types, ops.customer_relations,
+                    ops.customer_aliases
       TO ai_manager_dashboard_ro;
   END IF;
 
@@ -36,13 +37,18 @@ BEGIN
   --  閲覧ロール ai_manager_dashboard_ro 側のプールで行う)
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ai_manager_admin_rw') THEN
     GRANT USAGE ON SCHEMA ops TO ai_manager_admin_rw;
-    GRANT SELECT ON ops.customers,
-                    ops.industries, ops.customer_industries, ops.relation_types, ops.customer_relations
+    GRANT SELECT ON ops.customers, ops.projects,
+                    ops.industries, ops.customer_industries, ops.relation_types, ops.customer_relations,
+                    ops.customer_aliases
       TO ai_manager_admin_rw;
-    GRANT INSERT, UPDATE ON ops.industries, ops.relation_types, ops.customers
+    -- v0.9: プロジェクト管理ページ用に ops.projects の書込を追加(物理削除は付与しない)
+    GRANT INSERT, UPDATE ON ops.industries, ops.relation_types, ops.customers, ops.projects
       TO ai_manager_admin_rw;
     GRANT INSERT, UPDATE, DELETE ON ops.customer_industries, ops.customer_relations
       TO ai_manager_admin_rw;
+    -- customer_aliases は顧客編集フォームの洗い替え(DELETE + INSERT)用(v0.9)。
+    -- 洗い替えに UPDATE は不要のため付与しない(最小権限)
+    GRANT INSERT, DELETE ON ops.customer_aliases TO ai_manager_admin_rw;
     -- ナレッジ管理ページ(v0.4)の同期状態表示用の読取のみ。書込は付与しない
     -- (ナレッジの SoT は Drive。rag への書込は knowledge-sync ジョブ = app_rw の責務)
     GRANT USAGE ON SCHEMA rag TO ai_manager_admin_rw;

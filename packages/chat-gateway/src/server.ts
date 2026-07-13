@@ -1,5 +1,6 @@
 import {
   createAppServer,
+  isAppError,
   logger,
   query,
   readJsonBody,
@@ -89,8 +90,11 @@ export function createChatGatewayServer(pool: pg.Pool): http.Server {
             mode,
             text: messageText(event).slice(0, 80),
           });
+          // エラーコードを文言に含め、管理者が Cloud Logging・逆引き表(error-codes.md)で
+          // 原因を特定できるようにする(v0.9 §5: 診断性の向上)
+          const code = isAppError(err) ? `(エラーコード: ${err.code})` : '';
           const fallback: ChatAppMessage = {
-            text: '申し訳ありません、処理中にエラーが発生しました。少し時間をおいて再度お試しください。解決しない場合は管理者に連絡してください。',
+            text: `申し訳ありません、処理中にエラーが発生しました。少し時間をおいて再度お試しください。解決しない場合は管理者に連絡してください。${code}`,
           };
           sendJson(res, 200, wrapChatResponse(mode, fallback));
         }
