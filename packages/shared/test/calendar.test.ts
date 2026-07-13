@@ -70,6 +70,13 @@ describe('fetchEventsText(対象日のカレンダー取得 — v0.14 で batch 
     );
   });
 
+  it('予定なしの文言は対象日が当日なら移設前と同一(朝の問いかけ入力の下位互換 — 原則7)', async () => {
+    fetchMock.mockResolvedValueOnce(okResponse([]));
+    expect(await fetchEventsText('tanaka@example.com', jstDateString())).toBe(
+      '(本日の予定はありません)',
+    );
+  });
+
   it('CALENDAR_ENABLED 無効時は API を呼ばず undefined を返す', async () => {
     delete process.env['CALENDAR_ENABLED'];
     expect(calendarEnabled()).toBe(false);
@@ -122,5 +129,13 @@ describe('detectScheduleQuestion(予定質問のルールベース検知 — v0.
   it('予定キーワード(予定/カレンダー/スケジュール)を含まなければ undefined', () => {
     expect(detectScheduleQuestion('在庫の一般的な考え方を教えて')).toBeUndefined();
     expect(detectScheduleQuestion('明日までにA社の見積もりをお願いします')).toBeUndefined();
+  });
+
+  it('予定/スケジュールのみの業務ドメイン質問では発火しない(本人カレンダーの誤混入防止)', () => {
+    // 本人への言及・日付語を伴わない「予定/スケジュール」は業務知識の質問である可能性が高い
+    expect(detectScheduleQuestion('A社の納品スケジュールを教えて')).toBeUndefined();
+    expect(detectScheduleQuestion('来月のイベント予定について教えて')).toBeUndefined();
+    // 本人への言及があれば日付語がなくても当日として発火する
+    expect(detectScheduleQuestion('私の予定を確認して')).toBe(jstDateString());
   });
 });
