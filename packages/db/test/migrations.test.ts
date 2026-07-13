@@ -154,6 +154,45 @@ describe('migration 0007(問いかけ可否のユーザー単位設定)', () => 
     expect(adminBlock).toContain('ops.customer_aliases');
   });
 
+  it('migration 0009(v0.10): 計画情報は任意列+マイルストーンはプロジェクトのみに属する', async () => {
+    const migration = await read('migrations/0009_project_planning.sql');
+    // 任意項目(NOT NULL を付けない)
+    expect(migration).toContain('ADD COLUMN description TEXT;');
+    expect(migration).toContain('ADD COLUMN objective TEXT;');
+    expect(migration).not.toContain('description TEXT NOT NULL');
+    // マイルストーンは project_id のみを FK に持つ(タスク・顧客に紐づけない — 混同防止)
+    expect(migration).toContain('REFERENCES ops.projects(project_id)');
+    expect(migration).not.toContain('REFERENCES ops.tasks');
+    expect(migration).not.toContain('REFERENCES ops.customers');
+    expect(migration).toContain(`CHECK (status IN ('planned', 'done'))`);
+  });
+
+  it('v0.10 の GRANT: milestones は admin_rw で CRUD 可、tasks は SELECT+status 列の UPDATE のみ', async () => {
+    const grants = await read('etl/30_grants.sql');
+    const adminBlock = grants.slice(grants.indexOf('ai_manager_admin_rw:'));
+    expect(adminBlock).toContain(
+      'GRANT SELECT, INSERT, UPDATE, DELETE ON ops.project_milestones',
+    );
+    expect(adminBlock).toContain('GRANT SELECT ON ops.tasks');
+    expect(adminBlock).toContain('GRANT UPDATE (status, updated_at, completed_at) ON ops.tasks');
+    expect(adminBlock).not.toContain('GRANT INSERT, UPDATE ON ops.tasks'); // 起票は M3 が SoT
+    expect(adminBlock).toContain('GRANT SELECT, INSERT ON ops.task_status_log');
+    // dashboard_ro もマイルストーンを参照できる
+    const roBlock = grants.slice(
+      grants.indexOf('ai_manager_dashboard_ro:'),
+      grants.indexOf('ai_manager_admin_rw:'),
+    );
+    expect(roBlock).toContain('ops.project_milestones');
+
+    const verify = await readFile(
+      path.join(packageRoot, '..', '..', 'scripts', 'setup', 'verify-grants.sql'),
+      'utf8',
+    );
+    expect(verify).toContain(`('ops.project_milestones')`);
+    expect(verify).toContain(`'status', 'UPDATE'`); // tasks の列単位検証(§6)
+    expect(verify).toContain('ops.task_status_log');
+  });
+
   it('seed テンプレートは checkin_enabled を初期投入のみ設定し、ON CONFLICT で上書きしない', async () => {
     const seed = await readFile(
       path.join(packageRoot, '..', '..', 'scripts', 'setup', 'seed-users.sample.sql'),

@@ -26,7 +26,7 @@ BEGIN
                     ops.task_status_log, ops.suggestions, ops.escalations, ops.reports,
                     ops.v_dialogue_daily_stats,
                     ops.industries, ops.customer_industries, ops.relation_types, ops.customer_relations,
-                    ops.customer_aliases
+                    ops.customer_aliases, ops.project_milestones
       TO ai_manager_dashboard_ro;
   END IF;
 
@@ -49,6 +49,14 @@ BEGIN
     -- customer_aliases は顧客編集フォームの洗い替え(DELETE + INSERT)用(v0.9)。
     -- 洗い替えに UPDATE は不要のため付与しない(最小権限)
     GRANT INSERT, DELETE ON ops.customer_aliases TO ai_manager_admin_rw;
+    -- プロジェクト計画情報(v0.10): マイルストーンはプロジェクト編集ページで CRUD する
+    GRANT SELECT, INSERT, UPDATE, DELETE ON ops.project_milestones TO ai_manager_admin_rw;
+    -- タスク進捗管理(v0.10 §3): 一覧表示(SELECT)と status 列のみの更新を許可する。
+    -- タスクの起票・題名・担当・期限の変更は付与しない(起票は M3 の Chat 承認フローが SoT)。
+    -- 状態遷移の履歴は task_status_log へ INSERT(changed_via='admin')で記録する
+    GRANT SELECT ON ops.tasks TO ai_manager_admin_rw;
+    GRANT UPDATE (status, updated_at, completed_at) ON ops.tasks TO ai_manager_admin_rw;
+    GRANT SELECT, INSERT ON ops.task_status_log TO ai_manager_admin_rw;
     -- ナレッジ管理ページ(v0.4)の同期状態表示用の読取のみ。書込は付与しない
     -- (ナレッジの SoT は Drive。rag への書込は knowledge-sync ジョブ = app_rw の責務)
     GRANT USAGE ON SCHEMA rag TO ai_manager_admin_rw;

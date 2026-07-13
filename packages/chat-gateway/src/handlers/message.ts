@@ -6,6 +6,8 @@ import {
   detectTaskInstruction,
   EVENING_DIALOGUE_INSTRUCTION,
   EVENING_RESPONSE_SCHEMA,
+  fetchProjectContextById,
+  fetchProjectContextForUser,
   generateContent,
   generateJson,
   jstDateString,
@@ -72,6 +74,7 @@ import {
   scopeFallbackMode,
 } from '../services/knowledge-scope.js';
 import { fetchCustomerContext } from '../services/customer-context.js';
+import { identifyTargetProject } from '../services/project-scope.js';
 
 const MAX_CONTEXT_TURNS = 12;
 
@@ -145,17 +148,23 @@ async function continueMorningDialogue(
   dialogue: DialogueRow,
   text: string,
 ): Promise<ChatAppMessage> {
-  // タスク状況は補助文脈のため、取得失敗でも返信の処理を止めない(v0.9 §5・原則4)
-  const tasks = await openTasksSummary(pool, user.user_id).catch((err: unknown) => {
-    logger.error('タスク状況の取得に失敗しました(タスク文脈なしで継続)', err);
-    return '(タスク状況を取得できませんでした)';
-  });
+  // タスク状況・プロジェクト文脈(v0.10 §4.1)は補助文脈のため、取得失敗でも返信の処理を
+  // 止めない(v0.9 §5・原則4)。互いに独立のため並行取得する
+  const [tasks, projectContext] = await Promise.all([
+    openTasksSummary(pool, user.user_id).catch((err: unknown) => {
+      logger.error('タスク状況の取得に失敗しました(タスク文脈なしで継続)', err);
+      return '(タスク状況を取得できませんでした)';
+    }),
+    fetchProjectContextForUser(pool, user.user_id), // 内部で非ブロッキング
+  ]);
+  const projectBlock =
+    projectContext === undefined ? '' : `\n\n## プロジェクト文脈\n${projectContext}`;
   let value: MorningLlmResponse;
   let result: { model: string; inputTokens: number; outputTokens: number; costUsd: number };
   try {
     ({ value, result } = await generateJson<MorningLlmResponse>({
       tier: 'pro',
-      system: `${SYSTEM_PROMPT}\n\n${MORNING_DIALOGUE_INSTRUCTION}\n\n## 本人のタスク状況\n${tasks}`,
+      system: `${SYSTEM_PROMPT}\n\n${MORNING_DIALOGUE_INSTRUCTION}\n\n## 本人のタスク状況\n${tasks}${projectBlock}`,
       messages: turnsToMessages(dialogue.turns, text),
       responseSchema: MORNING_RESPONSE_SCHEMA as unknown as Record<string, unknown>,
     }));
@@ -212,17 +221,23 @@ async function continueAdhocCheckinDialogue(
   dialogue: DialogueRow,
   text: string,
 ): Promise<ChatAppMessage> {
-  // タスク状況は補助文脈のため、取得失敗でも返信の処理を止めない(v0.9 §5・原則4)
-  const tasks = await openTasksSummary(pool, user.user_id).catch((err: unknown) => {
-    logger.error('タスク状況の取得に失敗しました(タスク文脈なしで継続)', err);
-    return '(タスク状況を取得できませんでした)';
-  });
+  // タスク状況・プロジェクト文脈(v0.10 §4.1)は補助文脈のため、取得失敗でも返信の処理を
+  // 止めない(v0.9 §5・原則4)。互いに独立のため並行取得する
+  const [tasks, projectContext] = await Promise.all([
+    openTasksSummary(pool, user.user_id).catch((err: unknown) => {
+      logger.error('タスク状況の取得に失敗しました(タスク文脈なしで継続)', err);
+      return '(タスク状況を取得できませんでした)';
+    }),
+    fetchProjectContextForUser(pool, user.user_id), // 内部で非ブロッキング
+  ]);
+  const projectBlock =
+    projectContext === undefined ? '' : `\n\n## プロジェクト文脈\n${projectContext}`;
   // 構造化抽出が不要な軽量対話のため、pro ではなく flash のプレーンテキスト生成で応答する
   let result: Awaited<ReturnType<typeof generateContent>>;
   try {
     result = await generateContent({
       tier: 'flash',
-      system: `${SYSTEM_PROMPT}\n\n${ADHOC_CHECKIN_DIALOGUE_INSTRUCTION}\n\n## 本人のタスク状況\n${tasks}`,
+      system: `${SYSTEM_PROMPT}\n\n${ADHOC_CHECKIN_DIALOGUE_INSTRUCTION}\n\n## 本人のタスク状況\n${tasks}${projectBlock}`,
       messages: turnsToMessages(dialogue.turns, text),
     });
   } catch (err) {
@@ -376,16 +391,19 @@ interface QaLlmResponse {
 }
 
 /**
- * 対話文脈のプロジェクト顧客(v0.7 §4 の優先順②)を導出する:
- * 本人の直近の in_progress タスクが属するプロジェクトの顧客。
- * 質問文に顧客名の明示一致がない場合のフォールバックとして使われる。
- * 文脈顧客は補助情報のため、取得失敗は無視して従来動作(質問文からの特定のみ)に倒す。
+ * 対話文脈のプロジェクトとその顧客(v0.7 §4 / v0.10 §4.2 の優先順②)を導出する:
+ * 本人の直近の in_progress タスクが属するプロジェクトと、そのプロジェクトの顧客。
+ * 質問文に名称の明示一致がない場合のフォールバックとして使われる。
+ * 補助情報のため、取得失敗は無視して従来動作(質問文からの特定のみ)に倒す。
  */
-async function findContextCustomerId(pool: pg.Pool, userId: string): Promise<string | undefined> {
+async function findDialogueContext(
+  pool: pg.Pool,
+  userId: string,
+): Promise<{ customerId?: string; projectId?: string }> {
   try {
-    const result = await query<{ customer_id: string | null }>(
+    const result = await query<{ customer_id: string | null; project_id: string }>(
       pool,
-      `SELECT p.customer_id
+      `SELECT p.customer_id, p.project_id
          FROM ops.tasks t
          JOIN ops.projects p ON p.project_id = t.project_id
         WHERE t.assignee_id = $1 AND t.status = 'in_progress'
@@ -393,10 +411,15 @@ async function findContextCustomerId(pool: pg.Pool, userId: string): Promise<str
         LIMIT 1`,
       [userId],
     );
-    return result.rows[0]?.customer_id ?? undefined;
+    const row = result.rows[0];
+    if (row === undefined) return {};
+    return {
+      ...(row.customer_id === null ? {} : { customerId: row.customer_id }),
+      projectId: row.project_id,
+    };
   } catch (err) {
-    logger.error('文脈顧客の取得に失敗しました(質問文からの特定のみで継続)', err, { userId });
-    return undefined;
+    logger.error('対話文脈の取得に失敗しました(質問文からの特定のみで継続)', err, { userId });
+    return {};
   }
 }
 
@@ -412,8 +435,10 @@ async function answerAdhocQuestion(
   // ナレッジスコープ(要件 v0.3 §4): 対象顧客を特定できたら 1 ホップの到達可能集合で絞り、
   // 特定できなければ既定で顧客固有を除外する(誤混入防止)。例え話は共通ナレッジのため対象外
   // 優先順(v0.7 §4)①: 質問文の名称照合(明示的な言及を最優先) ②: 対話文脈のプロジェクト顧客
-  const contextCustomerId = await findContextCustomerId(pool, user.user_id);
-  const targetCustomerId = await identifyTargetCustomer(pool, text, contextCustomerId);
+  const context = await findDialogueContext(pool, user.user_id);
+  const targetCustomerId = await identifyTargetCustomer(pool, text, context.customerId);
+  // 対象プロジェクトの特定は顧客と独立に行う(v0.10 §4.2。混同せず、片方の欠落で他方を失わない)
+  const targetProjectId = await identifyTargetProject(pool, text, context.projectId);
 
   // スコープ導出の失敗は QA を止めず、安全側(顧客固有の除外)に倒す(v0.9 §5・原則4)
   let scope: Awaited<ReturnType<typeof resolveKnowledgeScope>> | 'exclude-customer' | undefined;
@@ -433,7 +458,7 @@ async function answerAdhocQuestion(
   // 顧客マスタ情報(v0.7 §3): 対象顧客の業界・顧客間関係を SoT(ops マスタ)から
   // 直接取得してプロンプトに供給する(取得失敗は非ブロッキングで undefined)。
   // ナレッジ検索(embedding 依存)の失敗も QA を止めず、参考情報なしで継続する(v0.9 §5)
-  const [chunks, analogies, customerContext] = await Promise.all([
+  const [chunks, analogies, customerContext, projectContext] = await Promise.all([
     searchKnowledge(pool, text, {
       docTypes: ['customer_profile', 'glossary', 'domain_ops', 'decision_rules'],
       limit: 5,
@@ -451,10 +476,16 @@ async function answerAdhocQuestion(
     targetCustomerId !== undefined
       ? fetchCustomerContext(pool, targetCustomerId)
       : Promise.resolve(undefined),
+    // プロジェクトの計画情報(v0.10 §4.2。内部で非ブロッキング)
+    targetProjectId !== undefined
+      ? fetchProjectContextById(pool, targetProjectId)
+      : Promise.resolve(undefined),
   ]);
 
   const customerContextBlock =
     customerContext === undefined ? '' : `\n\n## 顧客マスタ情報\n${customerContext}`;
+  const projectContextBlock =
+    projectContext === undefined ? '' : `\n\n## プロジェクト情報\n${projectContext}`;
   const analogyBlock =
     analogies.length === 0
       ? ''
@@ -462,7 +493,7 @@ async function answerAdhocQuestion(
 
   const { value, result } = await generateJson<QaLlmResponse>({
     tier,
-    system: `${SYSTEM_PROMPT}\n\n${ADHOC_QA_INSTRUCTION}${customerContextBlock}\n\n## 参考情報\n${formatKnowledgeContext(chunks)}${analogyBlock}`,
+    system: `${SYSTEM_PROMPT}\n\n${ADHOC_QA_INSTRUCTION}${customerContextBlock}${projectContextBlock}\n\n## 参考情報\n${formatKnowledgeContext(chunks)}${analogyBlock}`,
     messages: [{ role: 'user', text }],
     responseSchema: ADHOC_QA_RESPONSE_SCHEMA as unknown as Record<string, unknown>,
   });

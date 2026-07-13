@@ -48,9 +48,12 @@ FROM (VALUES
         ('ops.customer_relations'),
         ('ops.customer_aliases'),
         ('ops.customers'),
-        ('ops.projects')
+        ('ops.projects'),
+        ('ops.project_milestones')
      ) AS t(tbl)
 ORDER BY t.tbl;
+-- 補足(v0.10): ops.project_milestones はプロジェクト編集ページの CRUD 用に
+-- t / t / t / t(計画データのため削除可)が期待値。
 
 -- ── 3. ai_manager_admin_rw: ナレッジ管理(v0.4)の同期状態表示は読取のみ可 ──
 -- 期待値: can_select = t / can_insert = f / can_update = f / can_delete = f
@@ -65,7 +68,8 @@ SELECT 'ai_manager_admin_rw' AS role_name,
 -- ── 4. ai_manager_admin_rw: マスタ管理の対象外テーブルへは表レベルのアクセス不可 ──
 -- 期待値: 全行で can_select = f / can_insert = f / can_update = f / can_delete = f
 -- (ops.users は表レベルの権限を付与しない。ユーザー設定ページ v0.8 用の権限は
---  列単位のみで、セクション5で別途検証する。認証時のロール解決は
+--  列単位のみで、セクション5で別途検証する。ops.tasks は v0.10 で SELECT+status 列の
+--  UPDATE のみ付与されたため、セクション6で別途検証する。認証時のロール解決は
 --  ai_manager_dashboard_ro 側のプールで行う)
 SELECT 'ai_manager_admin_rw' AS role_name,
        t.tbl AS table_name,
@@ -75,7 +79,6 @@ SELECT 'ai_manager_admin_rw' AS role_name,
        has_table_privilege('ai_manager_admin_rw', t.tbl, 'DELETE') AS can_delete
 FROM (VALUES
         ('ops.users'),
-        ('ops.tasks'),
         ('ops.dialogues'),
         ('ops.escalations')
      ) AS t(tbl)
@@ -91,3 +94,19 @@ SELECT 'ai_manager_admin_rw' AS role_name,
        has_column_privilege('ai_manager_admin_rw', 'ops.users', 'email', 'SELECT') AS can_select_email,
        has_column_privilege('ai_manager_admin_rw', 'ops.users', 'checkin_enabled', 'UPDATE') AS can_update_checkin,
        has_column_privilege('ai_manager_admin_rw', 'ops.users', 'display_name', 'UPDATE') AS can_update_display_name;
+
+-- ── 6. ai_manager_admin_rw: タスク進捗管理(v0.10 §3)は SELECT+status 列の更新のみ ──
+-- 期待値: tasks の SELECT = t / INSERT = f / DELETE = f /
+--         status・updated_at・completed_at の UPDATE = t / title 等の他列の UPDATE = f /
+--         task_status_log の SELECT・INSERT = t / UPDATE・DELETE = f
+-- (タスクの起票・題名・担当・期限の変更は M3 の Chat 承認フローが SoT のため付与しない)
+SELECT 'ai_manager_admin_rw' AS role_name,
+       'ops.tasks / ops.task_status_log' AS target,
+       has_table_privilege('ai_manager_admin_rw', 'ops.tasks', 'SELECT') AS tasks_select,
+       has_table_privilege('ai_manager_admin_rw', 'ops.tasks', 'INSERT') AS tasks_insert,
+       has_table_privilege('ai_manager_admin_rw', 'ops.tasks', 'DELETE') AS tasks_delete,
+       has_column_privilege('ai_manager_admin_rw', 'ops.tasks', 'status', 'UPDATE') AS tasks_update_status,
+       has_column_privilege('ai_manager_admin_rw', 'ops.tasks', 'title', 'UPDATE') AS tasks_update_title,
+       has_table_privilege('ai_manager_admin_rw', 'ops.task_status_log', 'INSERT') AS log_insert,
+       has_table_privilege('ai_manager_admin_rw', 'ops.task_status_log', 'UPDATE') AS log_update,
+       has_table_privilege('ai_manager_admin_rw', 'ops.task_status_log', 'DELETE') AS log_delete;

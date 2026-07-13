@@ -18,6 +18,7 @@
 | M6 裁定ナレッジ還流 | **実装済み** | エスカレーションの「裁定を記録」→ resolution 保存 → decision_rules として rag へ embedding 付き還流(ADR-11) |
 | カレンダー連携(M2 拡張) | **実装済み(フラグ)** | ドメイン全体委任(SA キーレス、IAM signJwt)で本人の当日予定を取得し朝の問いかけへ反映 |
 | v0.7 顧客マスタ情報の回答参照 | **実装済み** | 随時 QA で対象顧客のマスタ情報(名称・所属業界・1ホップの顧客間関係)を SoT(ops マスタ)から毎回直接取得し「顧客マスタ情報」ブロックとしてプロンプトへ供給(ADR-13)。対象顧客の特定は「①質問文の名称照合 ②対話文脈」の優先順に改訂(v0.7 §4)。取得失敗は非ブロッキング(ナレッジのみで回答継続) |
+| v0.10 プロジェクト計画情報・タスク進捗管理・AI 文脈供給 | **実装済み** | projects に内容・目的(任意列)+project_milestones(migration 0009)。プロジェクト編集ページでマイルストーン CRUD・所属タスクの状態更新(task_status_log へ changed_via='admin' で記録。起票は M3 が SoT のまま — ADR-16)。計画情報を朝の問いかけ/状況確認/QA のプロンプトへ SoT 直接参照で供給(shared/project-context.ts。未入力項目は省略)。QA の対象プロジェクト特定は顧客特定と同じ優先順で独立に実施 |
 | v0.9 プロジェクト管理 UI・優先順改訂・エイリアス・耐障害性 | **実装済み** | プロジェクトの管理者限定 CRUD(/admin/projects。物理削除なし・状態 closed 運用)。明示的タスク指示を進行中対話より優先(ADR-15)。顧客エイリアス照合(migration 0008。設計 SoT は phase3-and-migration-design.md §2)+low エスカレーションへの対象顧客診断情報。対話継続の LLM 失敗時に返信ターンを保存して定型文フォールバック、QA 補助処理(スコープ導出・ナレッジ検索)の非ブロッキング化、汎用エラー文言への AIM コード付与 |
 | v0.8 問いかけ対象のユーザー単位設定 | **実装済み** | ops.users.checkin_enabled(migration 0007。既存行は member=可 / admin=不可で初期化 — 従来動作の保存)。morning/adhoc-checkin の対象クエリと状況確認画面をロール固定からフラグへ変更。管理者限定 /admin/users で可否を切替(監査ログ・CSRF)。ai_manager_admin_rw へ ops.users の列単位 GRANT(ADR-14) |
 | v0.5 管理者発火の状況確認 | **実装済み** | 管理者限定 /admin/checkin(active メンバー一覧+当日の朝/状況確認の応答状況、個別・全員への送信)。配信は batch の adhoc-checkin ジョブ(OIDC 起動・1日1回ガードなし。DM 未登録と、朝の問いかけ/振り返りに応答中のメンバーはスキップ — 対話の横取り防止、v0.5 §2-5)。文面は flash-lite 生成+定型文フォールバックで、冒頭に管理者発火を明示。返信は adhoc_checkin 対話として ops.dialogues に保存され、仮説形成を要求しない軽量な継続で2〜3往復の自然クローズ(migration 0006 で dialogue_type と dwh.dim_dialogue_type を拡張) |
@@ -118,11 +119,28 @@
   (対話クローズ後に送り直す運用)。LLM 分類に「対話継続か指示か」を判定させる案は、
   誤分類が再現不能な形で対話を壊すため採用しない
 
+### ADR-16: タスク進捗の UI 管理は「状態の更新のみ」を列単位権限で許可する
+
+- **決定**: プロジェクト編集ページ(v0.10)からのタスク操作は状態の更新に限定し、
+  ai_manager_admin_rw へは ops.tasks の SELECT+**status / updated_at / completed_at 列のみの
+  UPDATE**+task_status_log の SELECT / INSERT を付与する。タスクの起票(INSERT)・削除・
+  題名/担当/期限の変更は UI からもロールからも不可のままとする
+- **理由**: タスク作成は M3(Chat の指示 → AI 分解 → 承認カード → 担当へ DM 配信)が SoT で、
+  UI からの直接起票は承認フロー・配信・対話ログの整合を壊す。一方で「プロジェクト単位で
+  タスクを見渡して進捗を直したい」という運用要求(v0.10 C12)は状態の更新だけで満たせる。
+  列単位 GRANT により UI で可能な操作と DB 権限を正確に一致させる(ADR-14 と同じ手法)
+- **整合の担保**: 状態遷移は既存原則どおり task_status_log と同一トランザクションで記録し
+  (changed_via='admin')、dwh の fact_task_activity へ既存 ETL 経由で反映される。
+  同一状態への更新は no-op(履歴の汚染・冪等性の両立)
+- **トレードオフ**: 期限・担当の修正は SQL 運用のまま(必要になった時点で列単位 GRANT の
+  追加を判断)。completed_at は done 以外への遷移で NULL に戻る(再オープンの分析上の扱いは
+  fact_task_activity の遷移履歴が正)
+
 ## 4. セキュリティ境界の追加
 
 | 経路 | 保護 |
 |---|---|
-| ブラウザ → dashboard /admin/* | 既存の IAP+role=admin 判定に加え、専用 DB ロール(ai_manager_admin_rw: マスタ4表+顧客の書込可。v0.4 で rag.knowledge_chunks の SELECT、v0.8 で ops.users の列単位権限 — 表示列の SELECT+checkin_enabled のみの UPDATE、v0.9 で ops.projects の SELECT/INSERT/UPDATE と ops.customer_aliases の SELECT/INSERT/DELETE — を追加)、CSRF(__Host- クッキー+SameSite=Strict)、全書込の監査ログ。権限の実機検証は scripts/setup/verify-grants.sql |
+| ブラウザ → dashboard /admin/* | 既存の IAP+role=admin 判定に加え、専用 DB ロール(ai_manager_admin_rw: マスタ4表+顧客の書込可。v0.4 で rag.knowledge_chunks の SELECT、v0.8 で ops.users の列単位権限 — 表示列の SELECT+checkin_enabled のみの UPDATE、v0.9 で ops.projects の SELECT/INSERT/UPDATE と ops.customer_aliases の SELECT/INSERT/DELETE、v0.10 で ops.project_milestones の CRUD と ops.tasks の SELECT+status/updated_at/completed_at 列のみの UPDATE+task_status_log の SELECT/INSERT — を追加)、CSRF(__Host- クッキー+SameSite=Strict)、全書込の監査ログ。権限の実機検証は scripts/setup/verify-grants.sql |
 | dashboard → Drive(ナレッジ投入・削除) | ランタイム SA 自身のトークン(scope: drive。DWD 不使用)。SA が書込めるのは「編集者」で共有されたフォルダのみで、実効権限境界は Drive の共有 ACL(v0.4 §2)。削除はゴミ箱移動(復元可能) |
 | dashboard → batch(今すぐ同期) | OIDC ID トークン(audience=batch URL)+Cloud Run IAM(roles/run.invoker)+batch アプリ層の BATCH_INVOKER_SA 照合の多層防御 |
 | batch → 本人カレンダー | ドメイン全体委任(calendar.readonly のみ)。SA キー不発行(IAM signJwt)。委任スコープは Workspace 管理者が制御 |
@@ -133,5 +151,5 @@
 - dwh の業界分析軸(dim_project.industry)は主業界のみ(多対多の分析軸化は Phase 3 で検討)
 - レガシー列 ops.customers.industry は値空間を統一した上で残置(v0.3 §6 の二段階移行。ETL の customer_industries 切替後に削除)
 - 顧客マスタの無効化(v0.3 §5)は未対応 — ops.customers に active 列がないため。必要時にスキーマ追加を判断
-- タスクの一覧・編集 UI はダッシュボード未実装(Chat の動線が SoT。閲覧は既存の負荷マップ/プロジェクトページ)
+- タスクの UI 管理は v0.10 でプロジェクト編集ページの「一覧+状態更新」まで実装(ADR-16)。起票・題名・担当・期限の変更は引き続き Chat の動線(M3)が SoT
 - 例え話ライブラリの拡充・裁定の Drive 原本反映は運用タスク

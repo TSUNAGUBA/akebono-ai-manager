@@ -2,6 +2,7 @@ import {
   ADHOC_CHECKIN_INSTRUCTION,
   ADHOC_CHECKIN_MAX_TURNS,
   ADHOC_CHECKIN_PREFIX,
+  fetchProjectContextForUser,
   generateContent,
   jstDateString,
   logger,
@@ -150,6 +151,10 @@ export async function runAdhocCheckin(
       }
 
       const tasksSummary = await memberTasksSummary(pool, member.user_id);
+      // プロジェクトの計画情報(v0.10 §4.1。任意項目のため該当なしなら省略。内部で非ブロッキング)
+      const projectContext = await fetchProjectContextForUser(pool, member.user_id);
+      const projectBlock =
+        projectContext === undefined ? '' : `\nプロジェクト文脈:\n${projectContext}`;
 
       let messageText: string;
       let modelUsed: string | undefined;
@@ -163,7 +168,7 @@ export async function runAdhocCheckin(
           messages: [
             {
               role: 'user',
-              text: `メンバー: ${member.display_name}\n本人のタスク状況:\n${tasksSummary}`,
+              text: `メンバー: ${member.display_name}\n本人のタスク状況:\n${tasksSummary}${projectBlock}`,
             },
           ],
         });

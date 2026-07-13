@@ -90,6 +90,36 @@ describe('runMorningCheckin(朝の問いかけ配信)', () => {
     expect(space).toBe('spaces/admin1');
   });
 
+  it('プロジェクト文脈(目的・マイルストーン)があれば問いかけ生成に供給する(v0.10)', async () => {
+    const { pool } = createMockPool((text) => {
+      if (text.includes('FROM ops.users')) return { rows: [userWithDm] };
+      if (text.includes(`dialogue_type = 'morning_checkin'`)) return { rows: [] };
+      if (text.includes('GROUP BY p.project_id')) return { rows: [{ project_id: 'p1' }] };
+      if (text.includes('FROM ops.projects p')) {
+        return {
+          rows: [
+            {
+              project_id: 'p1',
+              name: 'A社SI',
+              customer_name: 'A社',
+              objective: '基幹システムの刷新',
+              description: null,
+            },
+          ],
+        };
+      }
+      if (text.includes('INSERT INTO ops.dialogues')) return { rows: [{ dialogue_id: '43' }] };
+      return { rows: [] };
+    });
+    await runMorningCheckin(pool);
+
+    const call = mocks.generateContent.mock.calls[0]?.[0] as {
+      messages: Array<{ role: string; text: string }>;
+    };
+    expect(call.messages[0]?.text).toContain('プロジェクト文脈:');
+    expect(call.messages[0]?.text).toContain('基幹システムの刷新');
+  });
+
   it('当日分の対話が既にあるユーザーはスキップする(冪等)', async () => {
     const { pool } = createMockPool((text) => {
       if (text.includes('FROM ops.users')) return { rows: [userWithDm] };

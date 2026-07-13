@@ -1,4 +1,4 @@
-import { query } from '@ai-manager/shared';
+import { query, withTransaction } from '@ai-manager/shared';
 import type pg from 'pg';
 import { responsiveTable, section, statusBadge } from '../../render/components.js';
 import { h, html, raw, type Raw } from '../../render/html.js';
@@ -28,7 +28,24 @@ interface ProjectRow {
   priority: number | null;
   admin_owner_id: string | null;
   owner_name: string | null;
+  description: string | null;
+  objective: string | null;
   updated: string;
+}
+
+interface MilestoneRow {
+  milestone_id: string;
+  title: string;
+  due_date: string | null;
+  status: string;
+}
+
+interface TaskRow {
+  task_id: string;
+  title: string;
+  status: string;
+  due_date: string | null;
+  assignee_name: string | null;
 }
 
 interface CustomerOption {
@@ -56,6 +73,16 @@ const PROJECT_TYPES: ReadonlyArray<{ value: string; label: string }> = [
  * プロジェクト状態。'active' のみがタスク指示(M3)の分解候補・稼働中の扱いになる
  * (chat-gateway の listActiveProjects が status = 'active' で絞る)。
  */
+/** タスク状態(ops.tasks の CHECK 制約と同じ値集合。ラベルは statusBadge と揃える)。 */
+const TASK_STATUSES: ReadonlyArray<{ value: string; label: string }> = [
+  { value: 'proposed', label: '提案中' },
+  { value: 'approved', label: '承認済み' },
+  { value: 'in_progress', label: '進行中' },
+  { value: 'blocked', label: 'ブロック' },
+  { value: 'done', label: '完了' },
+  { value: 'cancelled', label: '中止' },
+];
+
 const PROJECT_STATUSES: ReadonlyArray<{ value: string; label: string }> = [
   { value: 'active', label: '進行中' },
   { value: 'closed', label: '終了' },
@@ -76,7 +103,7 @@ export async function renderAdminProjects(pool: pg.Pool, ctx: AdminPageContext):
     pool,
     `SELECT p.project_id, p.name, p.customer_id, c.name AS customer_name,
             p.project_type, p.status, p.priority, p.admin_owner_id,
-            u.display_name AS owner_name,
+            u.display_name AS owner_name, p.description, p.objective,
             to_char(p.updated_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD HH24:MI') AS updated
      FROM ops.projects p
      LEFT JOIN ops.customers c ON c.customer_id = p.customer_id
@@ -180,6 +207,12 @@ export async function renderAdminProjects(pool: pg.Pool, ctx: AdminPageContext):
       <input type="number" name="priority" value="${r?.priority ?? ''}" placeholder="例: 10(小さいほど優先)">
     </label>
     ${selectField('admin_owner_id', '担当管理者', ownerOptions(r), r?.admin_owner_id ?? null, '(未設定)')}
+    <label class="field">目的(任意)
+      <textarea name="objective" maxlength="2000" placeholder="このプロジェクトで何を達成するか">${r?.objective ?? ''}</textarea>
+    </label>
+    <label class="field">内容(任意)
+      <textarea name="description" maxlength="2000" placeholder="プロジェクトの概要・スコープ">${r?.description ?? ''}</textarea>
+    </label>
   `;
 
   const editForm =
@@ -217,17 +250,162 @@ export async function renderAdminProjects(pool: pg.Pool, ctx: AdminPageContext):
     <button class="btn" type="submit">追加する</button>
   </form>`;
 
+  // 編集中のみ、計画情報(マイルストーン)と所属タスクの管理セクションを表示する(v0.10)。
+  // マイルストーンはプロジェクトにのみ属し、タスクは既存の ops.tasks.project_id で紐づく
+  // (相互に混ぜない — v0.10 §5)
+  let milestonesSection = html``;
+  let tasksSection = html``;
+  if (editing !== undefined) {
+    const milestones = await query<MilestoneRow>(
+      pool,
+      `SELECT milestone_id, title, due_date::text AS due_date, status
+       FROM ops.project_milestones
+       WHERE project_id = $1
+       ORDER BY due_date NULLS LAST, milestone_id`,
+      [editing.project_id],
+    );
+    const tasks = await query<TaskRow>(
+      pool,
+      `SELECT t.task_id, t.title, t.status, t.due_date::text AS due_date,
+              u.display_name AS assignee_name
+       FROM ops.tasks t
+       LEFT JOIN ops.users u ON u.user_id = t.assignee_id
+       WHERE t.project_id = $1
+       ORDER BY t.status, t.due_date NULLS LAST, t.task_id`,
+      [editing.project_id],
+    );
+
+    const milestoneOps = (m: MilestoneRow): Raw =>
+      raw(`<div class="btn-row">
+        <form method="post" action="${PATH}" class="inline-form">
+          ${csrfField(ctx).html}
+          <input type="hidden" name="action" value="toggle_milestone">
+          <input type="hidden" name="project_id" value="${h(editing.project_id)}">
+          <input type="hidden" name="milestone_id" value="${h(m.milestone_id)}">
+          <input type="hidden" name="status" value="${m.status === 'done' ? 'planned' : 'done'}">
+          <button class="btn" type="submit">${m.status === 'done' ? '未完了に戻す' : '完了にする'}</button>
+        </form>
+        <form method="post" action="${PATH}" class="inline-form"
+              onsubmit="return confirm('このマイルストーンを削除しますか?')">
+          ${csrfField(ctx).html}
+          <input type="hidden" name="action" value="delete_milestone">
+          <input type="hidden" name="project_id" value="${h(editing.project_id)}">
+          <input type="hidden" name="milestone_id" value="${h(m.milestone_id)}">
+          <button class="btn secondary" type="submit">削除</button>
+        </form>
+      </div>`);
+
+    const milestoneTable = responsiveTable(
+      [
+        { key: 'title', label: 'マイルストーン' },
+        { key: 'due', label: '期日' },
+        { key: 'state', label: '状態' },
+        { key: 'ops', label: '操作' },
+      ],
+      milestones.rows.map((m) => ({
+        title: m.title,
+        due: m.due_date ?? '—',
+        state: statusBadge(m.status),
+        ops: milestoneOps(m),
+      })),
+      { emptyText: 'マイルストーンは登録されていません(任意項目です)' },
+    );
+
+    const milestoneAddForm = html`<form method="post" action="${PATH}" class="card form">
+      ${csrfField(ctx)}
+      <input type="hidden" name="action" value="add_milestone">
+      <input type="hidden" name="project_id" value="${editing.project_id}">
+      <div class="form-grid">
+        <label class="field">マイルストーン名
+          <input type="text" name="title" required maxlength="500" placeholder="例: 要件確定">
+        </label>
+        <label class="field">期日(任意)
+          <input type="date" name="due_date">
+        </label>
+      </div>
+      <button class="btn" type="submit">マイルストーンを追加</button>
+    </form>`;
+
+    milestonesSection = section(
+      `マイルストーン: ${editing.name}`,
+      html`${milestoneTable}${milestoneAddForm}`,
+      'マイルストーンはこのプロジェクトにのみ属します(タスク・顧客とは独立)。登録すると AI の対話文脈に供給されます',
+    );
+
+    const taskStatusForm = (t: TaskRow): Raw => {
+      const options = TASK_STATUSES.map(
+        (s) =>
+          `<option value="${h(s.value)}"${s.value === t.status ? ' selected' : ''}>${h(s.label)}</option>`,
+      ).join('');
+      return raw(`<form method="post" action="${PATH}" class="inline-form">
+        ${csrfField(ctx).html}
+        <input type="hidden" name="action" value="update_task_status">
+        <input type="hidden" name="project_id" value="${h(editing.project_id)}">
+        <input type="hidden" name="task_id" value="${h(t.task_id)}">
+        <select name="status">${options}</select>
+        <button class="btn" type="submit">更新</button>
+      </form>`);
+    };
+
+    const taskTable = responsiveTable(
+      [
+        { key: 'id', label: 'ID' },
+        { key: 'title', label: 'タスク' },
+        { key: 'assignee', label: '担当' },
+        { key: 'due', label: '期限' },
+        { key: 'state', label: '状態' },
+        { key: 'ops', label: '進捗の更新' },
+      ],
+      tasks.rows.map((t) => ({
+        id: t.task_id,
+        title: t.title,
+        assignee: t.assignee_name ?? '—',
+        due: t.due_date ?? '—',
+        state: statusBadge(t.status),
+        ops: taskStatusForm(t),
+      })),
+      { emptyText: 'このプロジェクトのタスクはまだありません' },
+    );
+
+    tasksSection = section(
+      `タスクと進捗: ${editing.name}`,
+      taskTable,
+      'ここでは状態の更新のみ行えます(遷移は履歴に記録されます)。タスクの起票・題名・担当・期限の変更は Chat のタスク指示(M3 の承認フロー)から行ってください',
+    );
+  }
+
   return html`
     ${adminTabs(PATH)}
     ${flashMessages(ctx)}
     ${editing === undefined ? html`` : section(`プロジェクトの編集: ${editing.project_id}`, editForm)}
+    ${milestonesSection}
+    ${tasksSection}
     ${section(
       'プロジェクト一覧',
       table,
-      'タスクが参照するため物理削除はできません。終わったプロジェクトは状態を「終了」にします(終了にするとタスク指示の分解候補・朝の問いかけのタスク文脈から外れます)',
+      'タスクが参照するため物理削除はできません。終わったプロジェクトは状態を「終了」にします(終了にするとタスク指示の分解候補・朝の問いかけのタスク文脈から外れます)。行の「編集」から内容・目的・マイルストーン・タスク進捗を管理できます',
     )}
     ${section('プロジェクトの追加', createForm)}
   `;
+}
+
+/**
+ * 数値 ID(BIGINT 列の識別子)。requireRef は長さしか検証しないため、
+ * 非数値が PG の 22P02(→ 500)に落ちる前に 400 で弾く。
+ */
+function requireNumericId(form: URLSearchParams, field: string, label: string): string {
+  const value = requireRef(form, field, label);
+  if (!/^\d+$/.test(value)) {
+    throw invalidInput(`${label}の指定が不正です。ページを再読み込みしてやり直してください`);
+  }
+  return value;
+}
+
+/** YYYY-MM-DD 形式かつカレンダー上実在する日付か(2026-02-31 等を 500 にせず 400 で弾く)。 */
+function isRealDateString(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const date = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
 }
 
 /**
@@ -247,8 +425,13 @@ async function parseProjectFields(
   status: string;
   priority: number | null;
   adminOwnerId: string | null;
+  objective: string | null;
+  description: string | null;
 }> {
   const name = requireText(form, 'name', '名称');
+  // 計画情報はすべて任意(v0.10 §2: 詳細に計画されていないプロジェクトを許容する)
+  const objective = optionalText(form, 'objective', '目的', 2000);
+  const description = optionalText(form, 'description', '内容', 2000);
   const projectType = (form.get('project_type') ?? '').trim();
   if (!isValidChoice(PROJECT_TYPES, projectType)) {
     throw invalidInput('種別の指定が不正です');
@@ -274,7 +457,7 @@ async function parseProjectFields(
       throw invalidInput('担当管理者は admin ロールのユーザーから選択してください');
     }
   }
-  return { name, customerId, projectType, status, priority, adminOwnerId };
+  return { name, customerId, projectType, status, priority, adminOwnerId, objective, description };
 }
 
 /** プロジェクトへの書込。成功時はリダイレクト先を返す(PRG パターン)。 */
@@ -292,8 +475,9 @@ export async function handleAdminProjectsPost(
       await query(
         pool,
         `INSERT INTO ops.projects
-           (project_id, name, customer_id, project_type, status, priority, admin_owner_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+           (project_id, name, customer_id, project_type, status, priority, admin_owner_id,
+            objective, description)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
         [
           projectId,
           fields.name,
@@ -302,6 +486,8 @@ export async function handleAdminProjectsPost(
           fields.status,
           fields.priority,
           fields.adminOwnerId,
+          fields.objective,
+          fields.description,
         ],
       );
     } catch (err) {
@@ -342,7 +528,8 @@ export async function handleAdminProjectsPost(
         pool,
         `UPDATE ops.projects
          SET name = $2, customer_id = $3, project_type = $4, status = $5,
-             priority = $6, admin_owner_id = $7, updated_at = now()
+             priority = $6, admin_owner_id = $7, objective = $8, description = $9,
+             updated_at = now()
          WHERE project_id = $1`,
         [
           projectId,
@@ -352,6 +539,8 @@ export async function handleAdminProjectsPost(
           fields.status,
           fields.priority,
           fields.adminOwnerId,
+          fields.objective,
+          fields.description,
         ],
       );
     } catch (err) {
@@ -367,6 +556,114 @@ export async function handleAdminProjectsPost(
     }
     auditLog(viewer, 'project.update', { projectId }, { ...fields });
     return `${PATH}?saved=updated`;
+  }
+
+  // ── マイルストーン管理(v0.10 §2)────────────────────────────
+  // すべての操作で project_id を WHERE 条件に含め、別プロジェクトのマイルストーンを
+  // 操作できないようにする(hidden input 偽装への防御・混同防止 — v0.10 §5)
+
+  if (action === 'add_milestone') {
+    const projectId = requireRef(form, 'project_id', 'プロジェクトID');
+    const title = requireText(form, 'title', 'マイルストーン名');
+    const dueDate = optionalText(form, 'due_date', '期日');
+    if (dueDate !== null && !isRealDateString(dueDate)) {
+      throw invalidInput('期日は YYYY-MM-DD 形式の実在する日付で入力してください');
+    }
+    try {
+      await query(
+        pool,
+        `INSERT INTO ops.project_milestones (project_id, title, due_date)
+         VALUES ($1, $2, $3::date)`,
+        [projectId, title, dueDate],
+      );
+    } catch (err) {
+      if (hasPgCode(err, PG_FOREIGN_KEY_VIOLATION)) {
+        throw invalidInput(`プロジェクト「${projectId}」が見つかりません`);
+      }
+      throw err;
+    }
+    auditLog(viewer, 'milestone.create', { projectId }, { title, dueDate });
+    return `${PATH}?edit=${encodeURIComponent(projectId)}&saved=created`;
+  }
+
+  if (action === 'toggle_milestone') {
+    const projectId = requireRef(form, 'project_id', 'プロジェクトID');
+    const milestoneId = requireNumericId(form, 'milestone_id', 'マイルストーン');
+    const status = (form.get('status') ?? '').trim();
+    if (status !== 'planned' && status !== 'done') {
+      throw invalidInput('マイルストーン状態の指定が不正です');
+    }
+    const result = await query(
+      pool,
+      `UPDATE ops.project_milestones SET status = $3, updated_at = now()
+       WHERE milestone_id = $1 AND project_id = $2`,
+      [milestoneId, projectId, status],
+    );
+    if ((result.rowCount ?? 0) === 0) {
+      throw invalidInput('このプロジェクトのマイルストーンが見つかりません。ページを再読み込みしてやり直してください');
+    }
+    auditLog(viewer, 'milestone.toggle', { projectId, milestoneId }, { status });
+    return `${PATH}?edit=${encodeURIComponent(projectId)}&saved=updated`;
+  }
+
+  if (action === 'delete_milestone') {
+    const projectId = requireRef(form, 'project_id', 'プロジェクトID');
+    const milestoneId = requireNumericId(form, 'milestone_id', 'マイルストーン');
+    const result = await query(
+      pool,
+      `DELETE FROM ops.project_milestones WHERE milestone_id = $1 AND project_id = $2`,
+      [milestoneId, projectId],
+    );
+    if ((result.rowCount ?? 0) === 0) {
+      throw invalidInput('このプロジェクトのマイルストーンが見つかりません。ページを再読み込みしてやり直してください');
+    }
+    auditLog(viewer, 'milestone.delete', { projectId, milestoneId }, {});
+    return `${PATH}?edit=${encodeURIComponent(projectId)}&saved=deleted`;
+  }
+
+  // ── タスク進捗の更新(v0.10 §3)─────────────────────────────
+  // 状態の更新のみ(起票・題名・担当・期限の変更は M3 の Chat 承認フローが SoT)。
+  // 遷移は ops.task_status_log と同一トランザクションで記録する(tasks.ts と同じ原則)
+
+  if (action === 'update_task_status') {
+    const projectId = requireRef(form, 'project_id', 'プロジェクトID');
+    const taskId = requireNumericId(form, 'task_id', 'タスク');
+    const status = (form.get('status') ?? '').trim();
+    if (!isValidChoice(TASK_STATUSES, status)) {
+      throw invalidInput('タスク状態の指定が不正です');
+    }
+    let statusFrom: string | undefined;
+    await withTransaction(pool, async (client) => {
+      // project_id を条件に含め、別プロジェクトのタスクを更新できないようにする(混同防止)
+      const current = await query<{ status: string }>(
+        client,
+        `SELECT status FROM ops.tasks WHERE task_id = $1 AND project_id = $2 FOR UPDATE`,
+        [taskId, projectId],
+      );
+      statusFrom = current.rows[0]?.status;
+      if (statusFrom === undefined) {
+        throw invalidInput('このプロジェクトのタスクが見つかりません。ページを再読み込みしてやり直してください');
+      }
+      if (statusFrom === status) return; // 同一状態への更新は no-op(履歴を汚さない・冪等)
+      await query(
+        client,
+        `UPDATE ops.tasks
+         SET status = $2, updated_at = now(),
+             completed_at = CASE WHEN $2 = 'done' THEN now() ELSE NULL END
+         WHERE task_id = $1`,
+        [taskId, status],
+      );
+      await query(
+        client,
+        `INSERT INTO ops.task_status_log (task_id, status_from, status_to, changed_via)
+         VALUES ($1, $2, $3, 'admin')`,
+        [taskId, statusFrom, status],
+      );
+    });
+    if (statusFrom !== status) {
+      auditLog(viewer, 'task.status_update', { projectId, taskId }, { statusFrom, statusTo: status });
+    }
+    return `${PATH}?edit=${encodeURIComponent(projectId)}&saved=updated`;
   }
 
   throw invalidInput('不明な操作です');

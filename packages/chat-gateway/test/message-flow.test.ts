@@ -392,9 +392,12 @@ describe('随時 QA への顧客マスタ情報の供給(v0.7)', () => {
     if (text.includes('FROM ops.dialogues')) return { rows: [] };
     // 文脈顧客: 本人は undeux のタスクに着手中(明示一致がこれを上書きすることを検証)
     if (text.includes('FROM ops.tasks t')) return { rows: [{ customer_id: 'undeux' }] };
-    // 質問文の名称照合 → しまむら
-    if (text.includes('WITH candidates')) {
-      return { rows: [{ customer_id: 'shimamura', name: 'しまむら' }] };
+    // 質問文の名称照合 → しまむら(顧客照合のみ。プロジェクト照合は不一致)
+    if (text.includes('WITH candidates') && text.includes('FROM ops.customers')) {
+      return { rows: [{ customer_id: 'shimamura', match_text: 'しまむら' }] };
+    }
+    if (text.includes('WITH candidates') && text.includes('FROM ops.projects')) {
+      return { rows: [] };
     }
     if (text.includes('WITH RECURSIVE reach')) {
       return { rows: [{ customer_ids: ['shimamura', 'undeux'], industry_ids: ['apparel'] }] };
@@ -525,6 +528,136 @@ describe('随時 QA への顧客マスタ情報の供給(v0.7)', () => {
     const rag = findCall(calls, 'FROM rag.knowledge_chunks');
     expect(rag?.params[3]).toBe(true); // $4 = excludeCustomer
     expect(response.text).toBe('一般ナレッジに基づく回答です。');
+  });
+
+  it('プロジェクト名を含む質問には計画情報(目的・マイルストーン)を供給する(v0.10)', async () => {
+    mocks.generateJson.mockResolvedValueOnce({
+      value: { answer: 'A社SI の目的は基幹システムの刷新です。', confidence: 'high' },
+      result: llmResult,
+    });
+    const { pool } = createMockPool((text) => {
+      if (text.includes('INSERT INTO ops.dialogues')) {
+        return { rows: [{ dialogue_id: '34', created_at: new Date() }] };
+      }
+      if (text.includes('WITH candidates') && text.includes('FROM ops.projects')) {
+        return { rows: [{ project_id: 'a-sha-si', match_text: 'A社SI' }] };
+      }
+      if (text.includes('WITH candidates') && text.includes('FROM ops.customers')) {
+        return { rows: [] };
+      }
+      if (text.includes('FROM ops.projects p')) {
+        return {
+          rows: [
+            {
+              project_id: 'a-sha-si',
+              name: 'A社SI',
+              customer_name: 'A社',
+              objective: '基幹システムの刷新',
+              description: null,
+            },
+          ],
+        };
+      }
+      if (text.includes('FROM ops.project_milestones')) {
+        return {
+          rows: [
+            { project_id: 'a-sha-si', title: '要件確定', due_date: '2026-07-20', status: 'planned' },
+          ],
+        };
+      }
+      return { rows: [] };
+    });
+
+    const response = await handleMessage(pool, messageEvent('A社SI の目的を教えて'), member);
+
+    const genCall = mocks.generateJson.mock.calls[0]?.[0] as { system: string };
+    expect(genCall.system).toContain('## プロジェクト情報');
+    expect(genCall.system).toContain('目的: 基幹システムの刷新');
+    expect(genCall.system).toContain('[予定] 要件確定');
+    // 顧客を特定していないので顧客マスタ情報ブロックは供給されない(混同しない)
+    expect(genCall.system).not.toContain('## 顧客マスタ情報');
+    expect(response.text).toBe('A社SI の目的は基幹システムの刷新です。');
+  });
+
+  it('顧客とプロジェクトの両方に言及した質問には両ブロックを独立に供給する(v0.10 §5)', async () => {
+    mocks.generateJson.mockResolvedValueOnce({
+      value: { answer: '回答です。', confidence: 'high' },
+      result: llmResult,
+    });
+    const { pool } = createMockPool((text, params) => {
+      if (text.includes('WITH candidates') && text.includes('FROM ops.projects')) {
+        return { rows: [{ project_id: 'a-sha-si', match_text: 'A社SI' }] };
+      }
+      if (text.includes('FROM ops.projects p')) {
+        return {
+          rows: [
+            {
+              project_id: 'a-sha-si',
+              name: 'A社SI',
+              customer_name: 'しまむら',
+              objective: '基幹システムの刷新',
+              description: null,
+            },
+          ],
+        };
+      }
+      if (text.includes('FROM ops.project_milestones')) return { rows: [] };
+      return shimamuraResponder(text, params);
+    });
+
+    await handleMessage(pool, messageEvent('しまむら向けの A社SI の目的は?'), member);
+
+    const genCall = mocks.generateJson.mock.calls[0]?.[0] as { system: string };
+    expect(genCall.system).toContain('## 顧客マスタ情報');
+    expect(genCall.system).toContain('## プロジェクト情報');
+    // 境界: 顧客の関係はプロジェクトブロックに混ざらない(顧客名の属性表示のみ)
+    expect(genCall.system).toContain('undeux → しまむら: 納品先'); // 顧客マスタ情報側
+    expect(genCall.system).toContain('目的: 基幹システムの刷新'); // プロジェクト情報側
+  });
+
+  it('朝の対話継続にプロジェクト文脈(目的・マイルストーン)を供給する(v0.10 §4.1)', async () => {
+    mocks.generateJson.mockResolvedValueOnce({
+      value: { reply: '位置づけを確認しましょう。', hypothesis_complete: false },
+      result: llmResult,
+    });
+    const openMorning = {
+      dialogue_id: '71',
+      created_at: new Date(),
+      user_id: 'member1',
+      dialogue_type: 'morning_checkin',
+      task_id: null,
+      project_id: null,
+      turns: [{ role: 'ai', content: '今日は何から始めますか?', ts: new Date().toISOString() }],
+      hypothesis: null,
+      review: null,
+    };
+    const { pool } = createMockPool((text) => {
+      if (text.includes('FROM ops.suggestions')) return { rows: [] };
+      if (text.includes('UPDATE ops.dialogues')) return { rows: [], rowCount: 1 };
+      if (text.includes('FROM ops.dialogues')) return { rows: [openMorning] };
+      if (text.includes('GROUP BY p.project_id')) return { rows: [{ project_id: 'p1' }] };
+      if (text.includes('FROM ops.projects p')) {
+        return {
+          rows: [
+            {
+              project_id: 'p1',
+              name: 'A社SI',
+              customer_name: 'A社',
+              objective: '基幹システムの刷新',
+              description: null,
+            },
+          ],
+        };
+      }
+      return { rows: [] };
+    });
+
+    await handleMessage(pool, messageEvent('A社SIの設計から始めます'), member);
+
+    const genCall = mocks.generateJson.mock.calls[0]?.[0] as { system: string };
+    expect(genCall.system).toContain('## プロジェクト文脈');
+    expect(genCall.system).toContain('目的: 基幹システムの刷新');
+    expect(genCall.system).toContain('## 本人のタスク状況'); // タスクブロックとは独立(混ぜない)
   });
 
   it('対象顧客を特定できない質問ではマスタ情報を取得しない', async () => {
