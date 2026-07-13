@@ -152,6 +152,25 @@ describe('runEscalationAction: answer(メンバーへ回答を送信して解決
     expect(rollback?.params).toEqual(['9']);
   });
 
+  it('対話レコードの INSERT 失敗でも補償(open 巻き戻し)が走り failed を返す(クレーム後の無補償経路を作らない)', async () => {
+    const { pool, calls } = createMockPool((text, params) => {
+      if (text.includes('INSERT INTO ops.dialogues')) return new Error('db down');
+      return makeResponder()(text, params);
+    });
+    const summary = await runEscalationAction(pool, answerParams);
+
+    // 例外は伝播せず failed として返る(補償済みのため再操作で回復できる)
+    expect(summary).toEqual({ sent: 0, skipped: 0, failed: 1 });
+    // DM は送信されない(INSERT で失敗しているため)
+    expect(mocks.sendChatMessage).not.toHaveBeenCalled();
+    // 対話レコードは作成されていないため補償削除はスキップされる
+    expect(findCall(calls, 'DELETE FROM ops.dialogues')).toBeUndefined();
+    // クレーム済みの解決は巻き戻される(resolved のまま「回答済みに見えるが未送達」を残さない)
+    const rollback = findCall(calls, `SET status = 'open'`);
+    expect(rollback).toBeDefined();
+    expect(rollback?.params).toEqual(['9']);
+  });
+
   it('text 欠落・1000字超過は AIM-5005', async () => {
     const { pool } = createMockPool(makeResponder());
     for (const text of [undefined, 'あ'.repeat(1001)]) {
