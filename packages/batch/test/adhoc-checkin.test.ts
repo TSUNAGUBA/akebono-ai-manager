@@ -71,6 +71,10 @@ describe('runAdhocCheckin(管理者発火の状況確認)', () => {
     const summary = await runAdhocCheckin(pool);
 
     expect(summary).toEqual({ sent: 1, skipped: 1, failed: 0 });
+    // 対象選定はロールではなく問いかけ可否フラグ(v0.8)
+    const targetQuery = findCall(calls, 'FROM ops.users');
+    expect(targetQuery?.text).toContain('active AND checkin_enabled');
+    expect(targetQuery?.text).not.toContain(`role = 'member'`);
     // 対話は adhoc_checkin として記録される
     const insert = findCall(calls, 'INSERT INTO ops.dialogues');
     expect(insert?.text).toContain(`'adhoc_checkin'`);
@@ -108,6 +112,7 @@ describe('runAdhocCheckin(管理者発火の状況確認)', () => {
     expect(summary).toEqual({ sent: 1, skipped: 0, failed: 0 });
     const memberQuery = findCall(calls, 'FROM ops.users');
     expect(memberQuery?.text).toContain('user_id = $1');
+    expect(memberQuery?.text).toContain('active AND checkin_enabled'); // 可否フラグで防御(v0.8)
     expect(memberQuery?.params).toEqual(['member1']);
     expect(mocks.sendChatMessage).toHaveBeenCalledTimes(1);
   });

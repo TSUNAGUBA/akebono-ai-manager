@@ -30,8 +30,9 @@ BEGIN
   END IF;
 
   -- ai_manager_admin_rw: ダッシュボードのマスタ管理ページ専用(v0.3 §5.1)。
-  -- マスタ表と顧客のみ参照・書込可。既存の閲覧ロールの権限は広げない(最小権限)
-  -- (ops.users は含めない: マスタ管理ページは users を参照せず、認証時のロール解決は
+  -- マスタ表と顧客の参照・書込に加え、v0.8 でユーザーの問いかけ可否列のみ列単位で許可する。
+  -- 既存の閲覧ロールの権限は広げない(最小権限)
+  -- (ops.users の表レベル SELECT は付与しない: 認証時のロール解決は
   --  閲覧ロール ai_manager_dashboard_ro 側のプールで行う)
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ai_manager_admin_rw') THEN
     GRANT USAGE ON SCHEMA ops TO ai_manager_admin_rw;
@@ -46,8 +47,16 @@ BEGIN
     -- (ナレッジの SoT は Drive。rag への書込は knowledge-sync ジョブ = app_rw の責務)
     GRANT USAGE ON SCHEMA rag TO ai_manager_admin_rw;
     GRANT SELECT ON rag.knowledge_chunks TO ai_manager_admin_rw;
-    -- 過去の版で付与していた ops.users の SELECT を撤去する(適用済み環境を収束させる)
+    -- 過去の版で付与していた ops.users の表レベル SELECT を撤去する(適用済み環境を収束させる)。
+    -- 注意: 表レベルの REVOKE は列レベルの権限も併せて剥奪する(PostgreSQL の REVOKE 仕様)。
+    -- そのため列単位の GRANT は必ずこの REVOKE の後に置くこと(順序を入れ替えると
+    -- repeatable 実行のたびに列権限が消える。順序は migrations.test.ts で固定している)
     REVOKE SELECT ON ops.users FROM ai_manager_admin_rw;
+    -- ユーザー設定ページ(v0.8 /admin/users)用の最小権限: 一覧表示に必要な列の参照と、
+    -- 問いかけ可否列のみの更新を列単位で許可する(email 等の他列には触れない)
+    GRANT SELECT (user_id, display_name, role, active, chat_space_id, checkin_enabled)
+      ON ops.users TO ai_manager_admin_rw;
+    GRANT UPDATE (checkin_enabled) ON ops.users TO ai_manager_admin_rw;
   END IF;
 END
 $$;

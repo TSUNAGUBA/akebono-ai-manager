@@ -74,6 +74,8 @@ export async function memberTasksSummary(pool: pg.Pool, userId: string): Promise
 
 /**
  * 朝の問いかけ配信(M2)。
+ * 対象: 問いかけ可(checkin_enabled)の active なユーザー(v0.8 でロール固定から変更。
+ * 可否はダッシュボードの /admin/users から管理者がユーザー単位で設定する)。
  * 冪等性: 当日分の morning_checkin 対話が既にあるユーザーはスキップする。
  * 非ブロッキング: 個別ユーザーの失敗は記録して次のユーザーへ進む。
  */
@@ -88,7 +90,7 @@ export async function runMorningCheckin(pool: pg.Pool): Promise<JobSummary> {
   const members = await query<MemberRow>(
     pool,
     `SELECT user_id, display_name, email, chat_space_id
-     FROM ops.users WHERE active AND role = 'member'`,
+     FROM ops.users WHERE active AND checkin_enabled`,
   );
 
   for (const member of members.rows) {

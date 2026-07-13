@@ -35,6 +35,7 @@ const memberRows = [
     user_id: 'member1',
     display_name: '田中',
     dm_ready: true,
+    checkin_enabled: true,
     morning_sent: true,
     morning_answered: false,
     adhoc_sent: true,
@@ -45,6 +46,7 @@ const memberRows = [
     user_id: 'member2',
     display_name: '佐藤',
     dm_ready: false,
+    checkin_enabled: true,
     morning_sent: false,
     morning_answered: false,
     adhoc_sent: false,
@@ -128,6 +130,9 @@ describe('状況確認ページの描画', () => {
     const listQuery = captured[0]?.text ?? '';
     expect(listQuery).toContain('ops.v_dialogue_daily_stats');
     expect(listQuery).not.toContain('FROM ops.dialogues');
+    // 一覧はロールで絞らず、問いかけ可否列を含む(v0.8)
+    expect(listQuery).toContain('u.checkin_enabled');
+    expect(listQuery).not.toContain(`role = 'member'`);
     // 一覧+状態バッジ
     expect(out).toContain('田中');
     expect(out).toContain('未応答'); // 朝: 配信済み・仮説未確定
@@ -139,12 +144,13 @@ describe('状況確認ページの描画', () => {
     expect(out).toContain('/admin/checkin');
   });
 
-  it('集計ビューの拡張列が未反映でも一覧・送信は継続し、状況列は「不明」に落とす(原則4)', async () => {
+  it('db-migrate 未実行(集計ビュー拡張・checkin_enabled 列とも未反映)でも一覧・送信は継続し、状況・可否列は「不明」に落とす(原則4)', async () => {
     process.env['BATCH_URL'] = 'https://batch.example.run.app';
     const pool = {
       query: (text: string) => {
-        if (text.includes('v_dialogue_daily_stats')) {
-          return Promise.reject(new Error('column s.adhoc_checkin_sent does not exist'));
+        // migration 0007 未適用の DB を模す: 新列を参照するクエリは全て失敗する
+        if (text.includes('v_dialogue_daily_stats') || text.includes('checkin_enabled')) {
+          return Promise.reject(new Error('column does not exist'));
         }
         return Promise.resolve({
           rows: [{ user_id: 'member1', display_name: '田中', dm_ready: true }],
@@ -157,7 +163,9 @@ describe('状況確認ページの描画', () => {
     expect(out).toContain('田中');
     expect(out).toContain('不明');
     expect(out).toContain('db-migrate');
-    expect(out).toContain('>問いかける</button>'); // 送信は止めない
+    // 送信は止めない(可否の判定は batch / POST 検証側に倒す)
+    expect(out).toContain('>問いかける</button>');
+    expect(out).not.toContain('disabled title="問いかけ不可');
   });
 
   it('DM 未登録メンバーの個別ボタンは無効化される(送信してもスキップされる旨を明示)', async () => {
@@ -165,6 +173,14 @@ describe('状況確認ページの描画', () => {
     const out = (await renderAdminCheckin(stubPool(), adminCtx())).html;
     expect(out).toContain('member2');
     expect(out).toContain('disabled title="DM スペース未登録のため送信できません');
+  });
+
+  it('問いかけ不可のユーザーは不可バッジ+個別ボタン無効化で表示する(v0.8)', async () => {
+    process.env['BATCH_URL'] = 'https://batch.example.run.app';
+    const rows = [{ ...memberRows[0], checkin_enabled: false }];
+    const out = (await renderAdminCheckin(stubPool([], { rows }), adminCtx())).html;
+    expect(out).toContain('>不可<');
+    expect(out).toContain('disabled title="問いかけ不可に設定されているため送信できません');
   });
 
   it('応答中(open な朝/夕対話に本人の返信あり)メンバーの個別ボタンは無効化される(対話の横取り防止)', async () => {
@@ -282,6 +298,7 @@ describe('状況確認の送信ハンドラ(POST)', () => {
 
     assertCallsValid(captured);
     expect(captured[0]?.text).toContain('FROM ops.users');
+    expect(captured[0]?.text).toContain('checkin_enabled'); // 問いかけ可否も送信前に検証(v0.8)
     expect(captured[0]?.params).toEqual(['member1']);
     expect(fetchCalls[0]?.body).toBe(JSON.stringify({ userId: 'member1' }));
     expect(location).toBe('/admin/checkin?checkin=1&sent=1&skipped=0&failed=0');
@@ -299,7 +316,7 @@ describe('状況確認の送信ハンドラ(POST)', () => {
         ),
       ERROR_CODES.ADMIN_INPUT_INVALID,
       400,
-      '見つかりません',
+      '見つからないか、問いかけ不可',
     );
     expect(fetchCalls).toHaveLength(0);
   });

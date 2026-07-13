@@ -165,6 +165,10 @@ erDiagram
 
 ### 5.1 権限設計(重要)
 
+> **改訂(v0.8 §4):** [v0.8 追補](./ai-manager-requirements-v0.8-addendum.md)で、本ロールに
+> ops.users の**列単位**の権限(一覧表示列の SELECT+checkin_enabled のみの UPDATE)が追加された。
+> 表レベルの権限境界(マスタ 4 表+顧客)は維持される。以下は v0.3 時点の記録である。
+
 - **専用の書込ロール `ai_manager_admin_rw` を新設**し、マスタ 4 表(industries / customer_industries /
   customer_relations / relation_types)と ops.customers のみ INSERT / UPDATE を許可する
 - 既存の閲覧ロール(ai_manager_dashboard_ro)の権限は**広げない**。管理ページのリクエストのみ

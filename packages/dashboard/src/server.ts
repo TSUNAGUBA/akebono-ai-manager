@@ -27,6 +27,7 @@ import { handleAdminCustomersPost, renderAdminCustomers } from './pages/admin/cu
 import { handleAdminIndustriesPost, renderAdminIndustries } from './pages/admin/industries.js';
 import { handleAdminKnowledgePost, renderAdminKnowledge } from './pages/admin/knowledge.js';
 import { handleAdminRelationsPost, renderAdminRelations } from './pages/admin/relations.js';
+import { handleAdminUsersPost, renderAdminUsers } from './pages/admin/users.js';
 import type { Raw } from './render/html.js';
 import { errorPage, pageLayout, type Viewer } from './render/layout.js';
 import { STYLESHEET } from './render/style.js';
@@ -127,6 +128,14 @@ const ADMIN_PAGES: AdminPageDef[] = [
     description: '顧客間関係(有向)の一覧・追加・削除と関係種別マスタの管理',
     render: renderAdminRelations,
     handlePost: handleAdminRelationsPost,
+  },
+  {
+    path: '/admin/users',
+    title: 'マスタ管理: ユーザー',
+    description:
+      'AI からの問いかけ(朝の問いかけ・状況確認)の配信可否をユーザー単位で設定(追加・編集は SQL 運用)',
+    render: renderAdminUsers,
+    handlePost: handleAdminUsersPost,
   },
   {
     path: '/admin/knowledge',

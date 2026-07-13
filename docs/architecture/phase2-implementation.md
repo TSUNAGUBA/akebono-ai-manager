@@ -18,6 +18,7 @@
 | M6 裁定ナレッジ還流 | **実装済み** | エスカレーションの「裁定を記録」→ resolution 保存 → decision_rules として rag へ embedding 付き還流(ADR-11) |
 | カレンダー連携(M2 拡張) | **実装済み(フラグ)** | ドメイン全体委任(SA キーレス、IAM signJwt)で本人の当日予定を取得し朝の問いかけへ反映 |
 | v0.7 顧客マスタ情報の回答参照 | **実装済み** | 随時 QA で対象顧客のマスタ情報(名称・所属業界・1ホップの顧客間関係)を SoT(ops マスタ)から毎回直接取得し「顧客マスタ情報」ブロックとしてプロンプトへ供給(ADR-13)。対象顧客の特定は「①質問文の名称照合 ②対話文脈」の優先順に改訂(v0.7 §4)。取得失敗は非ブロッキング(ナレッジのみで回答継続) |
+| v0.8 問いかけ対象のユーザー単位設定 | **実装済み** | ops.users.checkin_enabled(migration 0007。既存行は member=可 / admin=不可で初期化 — 従来動作の保存)。morning/adhoc-checkin の対象クエリと状況確認画面をロール固定からフラグへ変更。管理者限定 /admin/users で可否を切替(監査ログ・CSRF)。ai_manager_admin_rw へ ops.users の列単位 GRANT(ADR-14) |
 | v0.5 管理者発火の状況確認 | **実装済み** | 管理者限定 /admin/checkin(active メンバー一覧+当日の朝/状況確認の応答状況、個別・全員への送信)。配信は batch の adhoc-checkin ジョブ(OIDC 起動・1日1回ガードなし。DM 未登録と、朝の問いかけ/振り返りに応答中のメンバーはスキップ — 対話の横取り防止、v0.5 §2-5)。文面は flash-lite 生成+定型文フォールバックで、冒頭に管理者発火を明示。返信は adhoc_checkin 対話として ops.dialogues に保存され、仮説形成を要求しない軽量な継続で2〜3往復の自然クローズ(migration 0006 で dialogue_type と dwh.dim_dialogue_type を拡張) |
 
 ## 2. 段階運用の切り分け(フラグ一覧)
@@ -84,11 +85,30 @@
 - **再検討条件**: 対象顧客あたりの関係エッジが数百件を超えた時点、またはマスタ横断の
   意味検索(「アパレルの納品先を持つ顧客は?」等)が要件化された時点
 
+### ADR-14: 問いかけ対象はロールではなくユーザー単位フラグで選定し、UI 書込は列単位 GRANT で限定する
+
+- **決定**: 朝の問いかけ・状況確認の配信対象を `role = 'member'` 固定から
+  `ops.users.checkin_enabled`(ユーザー単位フラグ)に変更した(要件 v0.8)。設定 UI は
+  管理者限定 /admin/users とし、書込ロール ai_manager_admin_rw には ops.users の
+  **列単位の権限**(一覧表示列の SELECT+checkin_enabled のみの UPDATE)だけを追加した
+- **理由**: ①ロールは権限の軸であり問いかけの要否とは独立した関心事(管理者に届けたい/特定
+  メンバーには止めたいの両方をロール変更なしで実現する)。②表レベルの GRANT では UI 経由で
+  名前・ロール・active まで変更可能になり、v0.3 §5.1 の「ユーザーマスタは SQL 運用」の境界が
+  崩れる。列単位 GRANT なら UI で変更できる範囲が機能要件と正確に一致する
+- **下位互換**: migration 0007 が既存行を従来動作(member=可 / admin=不可)で初期化するため、
+  適用直後の配信対象は変わらない。seed テンプレートは ON CONFLICT で checkin_enabled を
+  上書きしない(再実行が UI の設定を巻き戻さない — 原則2)
+- **トレードオフ**: 問いかけ種別ごとの細分化(朝のみ可等)はできない(必要になった時点で
+  列追加を判断)。日報・週次サマリ等のレポート系は従来どおりロール基準(v0.8 §6)。
+  管理者を問いかけ可にすると、open な朝の対話がタスク指示(M3)を吸収し得る
+  (進行中対話の継続が指示検知より優先されるため — 既知の制約として v0.8 §3.4 に運用
+  ガイダンスとともに文書化。M3 の優先順自体は変更しない)
+
 ## 4. セキュリティ境界の追加
 
 | 経路 | 保護 |
 |---|---|
-| ブラウザ → dashboard /admin/* | 既存の IAP+role=admin 判定に加え、専用 DB ロール(ai_manager_admin_rw: マスタ4表+顧客のみ書込可。v0.4 で rag.knowledge_chunks の SELECT のみ追加)、CSRF(__Host- クッキー+SameSite=Strict)、全書込の監査ログ |
+| ブラウザ → dashboard /admin/* | 既存の IAP+role=admin 判定に加え、専用 DB ロール(ai_manager_admin_rw: マスタ4表+顧客の書込可。v0.4 で rag.knowledge_chunks の SELECT、v0.8 で ops.users の列単位権限 — 表示列の SELECT+checkin_enabled のみの UPDATE — を追加)、CSRF(__Host- クッキー+SameSite=Strict)、全書込の監査ログ |
 | dashboard → Drive(ナレッジ投入・削除) | ランタイム SA 自身のトークン(scope: drive。DWD 不使用)。SA が書込めるのは「編集者」で共有されたフォルダのみで、実効権限境界は Drive の共有 ACL(v0.4 §2)。削除はゴミ箱移動(復元可能) |
 | dashboard → batch(今すぐ同期) | OIDC ID トークン(audience=batch URL)+Cloud Run IAM(roles/run.invoker)+batch アプリ層の BATCH_INVOKER_SA 照合の多層防御 |
 | batch → 本人カレンダー | ドメイン全体委任(calendar.readonly のみ)。SA キー不発行(IAM signJwt)。委任スコープは Workspace 管理者が制御 |

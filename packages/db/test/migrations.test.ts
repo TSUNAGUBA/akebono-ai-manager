@@ -60,3 +60,51 @@ describe('migration 0006(dialogue_type の adhoc_checkin 拡張)', () => {
     expect(view.indexOf('AS responding')).toBeGreaterThan(view.indexOf('AS adhoc_checkin_answered'));
   });
 });
+
+/**
+ * v0.8(問いかけ可否のユーザー単位設定)の整合テスト。
+ * - 0007 の列追加と、既存行の初期値がロールから導出されること(従来動作の保存・原則7)
+ * - admin_rw への権限が列単位で、表レベル REVOKE の後に付与されること(最小権限の維持)
+ * - seed テンプレートの再実行が UI で変更した可否設定を巻き戻さないこと(原則2)
+ */
+describe('migration 0007(問いかけ可否のユーザー単位設定)', () => {
+  const read = (rel: string): Promise<string> => readFile(path.join(packageRoot, rel), 'utf8');
+
+  it('checkin_enabled 列を NOT NULL DEFAULT TRUE で追加し、既存行はロールから初期化する', async () => {
+    const migration = await read('migrations/0007_user_checkin_enabled.sql');
+    expect(migration).toContain(
+      'ALTER TABLE ops.users ADD COLUMN checkin_enabled BOOLEAN NOT NULL DEFAULT TRUE',
+    );
+    // 従来動作の保存: member のみ問いかけ対象だった(admin は対象外)
+    expect(migration).toContain(`SET checkin_enabled = (role = 'member')`);
+  });
+
+  it('admin_rw への ops.users 権限は列単位で、表レベル REVOKE の後に付与される', async () => {
+    const grants = await read('etl/30_grants.sql');
+    const revokeIdx = grants.indexOf('REVOKE SELECT ON ops.users FROM ai_manager_admin_rw');
+    const grantSelectIdx = grants.indexOf('GRANT SELECT (user_id');
+    const grantUpdateIdx = grants.indexOf('GRANT UPDATE (checkin_enabled) ON ops.users');
+    expect(revokeIdx).toBeGreaterThan(-1);
+    // repeatable マイグレーションは毎回上から順に実行されるため、
+    // REVOKE(表レベル)→ GRANT(列レベル)の順でないと権限が消える
+    expect(grantSelectIdx).toBeGreaterThan(revokeIdx);
+    expect(grantUpdateIdx).toBeGreaterThan(revokeIdx);
+    // 更新は checkin_enabled 列のみ(表レベルの UPDATE は付与しない)
+    expect(grants).not.toContain('GRANT INSERT, UPDATE ON ops.users');
+    expect(grants).not.toContain('GRANT UPDATE ON ops.users');
+  });
+
+  it('seed テンプレートは checkin_enabled を初期投入のみ設定し、ON CONFLICT で上書きしない', async () => {
+    const seed = await readFile(
+      path.join(packageRoot, '..', '..', 'scripts', 'setup', 'seed-users.sample.sql'),
+      'utf8',
+    );
+    expect(seed).toContain('checkin_enabled');
+    // 冒頭コメントにも「ON CONFLICT」が現れるため、実際の句(最後の出現)以降を検証する。
+    // 句自体の存在を先に検証する(存在しないと slice(-1) が末尾1文字になり検証が無効化される)
+    const conflictIdx = seed.lastIndexOf('ON CONFLICT (user_id) DO UPDATE');
+    expect(conflictIdx, '再実行安全のための ON CONFLICT 句が存在すること').toBeGreaterThan(-1);
+    // 再実行で UI の可否設定を巻き戻さない(原則2: 設定系データの保護)
+    expect(seed.slice(conflictIdx)).not.toContain('checkin_enabled');
+  });
+});

@@ -8,8 +8,9 @@ import { triggerBatchJob } from './batch-trigger.js';
 import { adminTabs, csrfField, flashMessages, type AdminPageContext } from './common.js';
 
 /**
- * 状況確認(要件 v0.5): active メンバーの一覧+当日の対話状況を表示し、
+ * 状況確認(要件 v0.5): active ユーザーの一覧+当日の対話状況を表示し、
  * 管理者の意志で「現在の進捗・状況の問いかけ」を個別/全員へ送信する。
+ * 送信対象は問いかけ可(checkin_enabled)のユーザーのみ(v0.8。可否は /admin/users で設定)。
  *
  * 配信の実行主体は batch(朝の問いかけと同一経路)。本ページは「今すぐ同期」と同じ
  * OIDC 呼び出しパターンで batch の /jobs/adhoc-checkin を起動するだけで、
@@ -26,6 +27,8 @@ interface MemberStatusRow {
   user_id: string;
   display_name: string;
   dm_ready: boolean;
+  /** 問いかけ可否(v0.8: ユーザー単位設定。「ユーザー」タブで変更する)。 */
+  checkin_enabled: boolean;
   morning_sent: boolean;
   morning_answered: boolean;
   adhoc_sent: boolean;
@@ -52,7 +55,7 @@ function checkinFlash(ctx: AdminPageContext): Raw {
     const failed = count('failed');
     const tone = failed === '0' ? 'ok' : 'error';
     return raw(
-      `<div class="alert ${tone}">状況確認を送信しました(送信 ${count('sent')} 件・スキップ ${count('skipped')} 件・失敗 ${count('failed')} 件)。DM 未登録、または朝の問いかけ・振り返りに応答中のメンバーはスキップされます</div>`,
+      `<div class="alert ${tone}">状況確認を送信しました(送信 ${count('sent')} 件・スキップ ${count('skipped')} 件・失敗 ${count('failed')} 件)。問いかけ不可のユーザーは対象外です。DM 未登録、または朝の問いかけ・振り返りに応答中のユーザーはスキップされます</div>`,
     );
   }
   const errorKey = params.get('checkin_error');
@@ -80,8 +83,9 @@ function adhocBadge(row: MemberStatusRow): Raw {
 export async function renderAdminCheckin(pool: pg.Pool, ctx: AdminPageContext): Promise<Raw> {
   const today = jstDateString();
 
-  // 当日の対話状況は表示用の補助情報。集計ビューの拡張列が未反映(db-migrate 未実行)でも
-  // 一覧と送信は止めず、状況列のみ「不明」に落とす(原則4: グレースフルデグラデーション)
+  // 当日の対話状況・問いかけ可否は表示用の補助情報。db-migrate 未実行(集計ビューの拡張列や
+  // ops.users.checkin_enabled 列が未反映)でも一覧と送信は止めず、該当列のみ「不明」に落とす
+  // (原則4: グレースフルデグラデーション。フォールバックは新列を参照しない)
   let statsUnavailable = false;
   let members: MemberStatusRow[];
   try {
@@ -91,6 +95,7 @@ export async function renderAdminCheckin(pool: pg.Pool, ctx: AdminPageContext): 
          u.user_id,
          u.display_name,
          (u.chat_space_id IS NOT NULL) AS dm_ready,
+         u.checkin_enabled,
          COALESCE(s.morning_checkin_sent, FALSE) AS morning_sent,
          COALESCE(s.checkin_answered, FALSE) AS morning_answered,
          COALESCE(s.adhoc_checkin_sent, FALSE) AS adhoc_sent,
@@ -99,7 +104,7 @@ export async function renderAdminCheckin(pool: pg.Pool, ctx: AdminPageContext): 
        FROM ops.users u
        LEFT JOIN ops.v_dialogue_daily_stats s
          ON s.user_id = u.user_id AND s.jst_date = $1::date
-       WHERE u.active AND u.role = 'member'
+       WHERE u.active
        ORDER BY u.display_name`,
       [today],
     );
@@ -108,18 +113,21 @@ export async function renderAdminCheckin(pool: pg.Pool, ctx: AdminPageContext): 
     statsUnavailable = true;
     logger.warn('当日の対話状況の集計に失敗しました(状況列なしで一覧・送信を継続)', {
       errorCode: ERROR_CODES.DASHBOARD_QUERY_FAILED,
-      hint: 'db-migrate ジョブの再実行で v_dialogue_daily_stats の拡張列を反映してください',
+      hint: 'db-migrate ジョブの再実行で ops.users.checkin_enabled 列と v_dialogue_daily_stats の拡張列を反映してください',
       cause: err instanceof Error ? err.message : String(err),
     });
+    // checkin_enabled(migration 0007)も未適用の可能性があるため参照しない。
+    // 可否は「不明」表示とし、送信ボタンは有効のまま倒す(判定の SoT は batch / POST 検証側)
     const fallback = await query<Pick<MemberStatusRow, 'user_id' | 'display_name' | 'dm_ready'>>(
       pool,
       `SELECT u.user_id, u.display_name, (u.chat_space_id IS NOT NULL) AS dm_ready
        FROM ops.users u
-       WHERE u.active AND u.role = 'member'
+       WHERE u.active
        ORDER BY u.display_name`,
     );
     members = fallback.rows.map((row) => ({
       ...row,
+      checkin_enabled: true,
       morning_sent: false,
       morning_answered: false,
       adhoc_sent: false,
@@ -132,13 +140,15 @@ export async function renderAdminCheckin(pool: pg.Pool, ctx: AdminPageContext): 
 
   const sendForm = (row: MemberStatusRow): Raw => {
     if (batchUrl === '') return raw('—');
-    // DM 未登録・応答中は送信してもスキップされるため、ボタンを無効化して理由を示す。
+    // 問いかけ不可・DM 未登録・応答中は送信してもスキップされるため、ボタンを無効化して理由を示す。
     // 判定の SoT は batch 側(集計ビュー未反映時はボタン有効のまま batch がスキップする)
-    const disabledReason = !row.dm_ready
-      ? 'DM スペース未登録のため送信できません(本人が Chat アプリに一度話しかけると登録されます)'
-      : row.responding
-        ? '朝の問いかけ・振り返りに応答中のため送信できません(対話の横取り防止。応答の完了後に送信できます)'
-        : undefined;
+    const disabledReason = !row.checkin_enabled
+      ? '問いかけ不可に設定されているため送信できません(「ユーザー」タブで変更できます)'
+      : !row.dm_ready
+        ? 'DM スペース未登録のため送信できません(本人が Chat アプリに一度話しかけると登録されます)'
+        : row.responding
+          ? '朝の問いかけ・振り返りに応答中のため送信できません(対話の横取り防止。応答の完了後に送信できます)'
+          : undefined;
     const disabled = disabledReason === undefined ? '' : ` disabled title="${h(disabledReason)}"`;
     return raw(`<form method="post" action="${PATH}" class="inline-form">
       ${csrfField(ctx).html}
@@ -151,6 +161,7 @@ export async function renderAdminCheckin(pool: pg.Pool, ctx: AdminPageContext): 
   const table = responsiveTable(
     [
       { key: 'name', label: '名前' },
+      { key: 'checkin', label: '問いかけ' },
       { key: 'dm', label: 'DM 登録' },
       { key: 'morning', label: '朝の問いかけ(今日)' },
       { key: 'adhoc', label: '状況確認(今日)' },
@@ -158,12 +169,17 @@ export async function renderAdminCheckin(pool: pg.Pool, ctx: AdminPageContext): 
     ],
     members.map((row) => ({
       name: row.display_name,
+      checkin: statsUnavailable
+        ? badge('不明', 'muted')
+        : row.checkin_enabled
+          ? badge('可', 'ok')
+          : badge('不可', 'muted'),
       dm: row.dm_ready ? badge('登録済み', 'ok') : badge('未登録', 'warn'),
       morning: statsUnavailable ? badge('不明', 'muted') : morningBadge(row),
       adhoc: statsUnavailable ? badge('不明', 'muted') : adhocBadge(row),
       ops: sendForm(row),
     })),
-    { emptyText: 'active なメンバーが登録されていません' },
+    { emptyText: 'active なユーザーが登録されていません' },
   );
 
   const statsNote = statsUnavailable
@@ -178,12 +194,12 @@ export async function renderAdminCheckin(pool: pg.Pool, ctx: AdminPageContext): 
         </p>`
       : html`<div class="btn-row">
           <form method="post" action="${PATH}" class="inline-form"
-                onsubmit="return confirm('active なメンバー全員に状況確認を送信しますか?')">
+                onsubmit="return confirm('問いかけ可のユーザー全員に状況確認を送信しますか?')">
             ${csrfField(ctx)}
             <input type="hidden" name="action" value="send_all">
             <button class="btn" type="submit">全員に問いかける</button>
           </form>
-          <span class="form-help">DM 未登録のメンバーと、朝の問いかけ・振り返りに応答中(仮説形成の途中)のメンバーはスキップされ、結果に件数が表示されます</span>
+          <span class="form-help">対象は「問いかけ可」のユーザーのみ(可否は「ユーザー」タブで設定)。DM 未登録のユーザーと、朝の問いかけ・振り返りに応答中(仮説形成の途中)のユーザーはスキップされ、結果に件数が表示されます</span>
         </div>`;
 
   return html`
@@ -217,15 +233,18 @@ export async function handleAdminCheckinPost(
 
   let userId: string | undefined;
   if (action === 'send') {
-    userId = requireRef(form, 'user_id', '対象メンバー');
-    // 対象の実在性を SoT(ops.users)で検証する(hidden input 偽装・登録変更との競合に備える。batch 側でも防御)
+    userId = requireRef(form, 'user_id', '対象ユーザー');
+    // 対象の実在性と問いかけ可否を SoT(ops.users)で検証する
+    // (hidden input 偽装・登録変更・可否変更との競合に備える。batch 側でも防御)
     const found = await query(
       pool,
-      `SELECT 1 FROM ops.users WHERE user_id = $1 AND active AND role = 'member'`,
+      `SELECT 1 FROM ops.users WHERE user_id = $1 AND active AND checkin_enabled`,
       [userId],
     );
     if ((found.rowCount ?? 0) === 0) {
-      throw invalidInput('対象メンバーが見つかりません。ページを再読み込みしてやり直してください');
+      throw invalidInput(
+        '対象ユーザーが見つからないか、問いかけ不可に設定されています。ページを再読み込みしてやり直してください',
+      );
     }
   }
   // batch の /jobs/adhoc-checkin を起動する(「今すぐ同期」と共通のヘルパー)。
@@ -239,7 +258,7 @@ export async function handleAdminCheckinPost(
     errorCode: ERROR_CODES.CHECKIN_TRIGGER_FAILED,
     body: userId === undefined ? {} : { userId },
     auditAction: 'checkin.send',
-    auditDetails: { target: userId ?? 'all-members' },
+    auditDetails: { target: userId ?? 'all-checkin-enabled-users' },
     redirectBase: PATH,
     successParam: 'checkin',
     errorParam: 'checkin_error',
