@@ -15,10 +15,11 @@ const supplyRelation = {
   notes: null,
 };
 
-function responderWith(relations: unknown[]): Responder {
+function responderWith(relations: unknown[], projects: unknown[] = []): Responder {
   return (text) => {
     if (text.includes('FROM ops.customers c')) return { rows: [shimamura] };
     if (text.includes('FROM ops.customer_relations')) return { rows: relations };
+    if (text.includes('FROM ops.projects')) return { rows: projects };
     return { rows: [] };
   };
 }
@@ -71,6 +72,42 @@ describe('fetchCustomerContext(顧客マスタ情報のプロンプト供給)', 
     });
     const block = await fetchCustomerContext(pool, 'shimamura');
     expect(block).toContain('しまむら(所属業界: 未登録)');
+  });
+
+  it('登録プロジェクトを進行中優先で列挙する(v0.13: 顧客⇔プロジェクト相関)', async () => {
+    const { pool, calls } = createMockPool(
+      responderWith(
+        [supplyRelation],
+        [
+          { name: 'しまむらWMS', status: 'active' },
+          { name: '旧基幹移行', status: 'closed' },
+        ],
+      ),
+    );
+    const block = await fetchCustomerContext(pool, 'shimamura');
+
+    // 「{顧客}で進んでいるプロジェクトは?」に確定情報で答えられる
+    expect(block).toContain('### 登録プロジェクト');
+    expect(block).toContain('- しまむらWMS(進行中)');
+    expect(block).toContain('- 旧基幹移行(終了)');
+
+    const projectCall = findCall(calls, 'FROM ops.projects');
+    expect(projectCall?.params).toEqual(['shimamura']);
+    expect(projectCall?.text).toContain(`(status = 'active') DESC`); // 進行中を先頭に
+  });
+
+  it('プロジェクトが未登録なら「登録されたプロジェクトはありません」と明示する(v0.13)', async () => {
+    const { pool } = createMockPool(responderWith([supplyRelation], []));
+    const block = await fetchCustomerContext(pool, 'shimamura');
+    expect(block).toContain('(この顧客に登録されたプロジェクトはありません)');
+  });
+
+  it('リスト外の status 値はそのまま表示する(SQL 直登録の値を黙って欠落させない)', async () => {
+    const { pool } = createMockPool(
+      responderWith([], [{ name: '保守契約', status: 'suspended' }]),
+    );
+    const block = await fetchCustomerContext(pool, 'shimamura');
+    expect(block).toContain('- 保守契約(suspended)');
   });
 
   it('顧客がマスタに存在しなければ undefined を返す', async () => {

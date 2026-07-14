@@ -20,7 +20,7 @@ import { h, html, raw, type Raw } from '../../render/html.js';
 import type { Viewer } from '../../render/layout.js';
 import { auditLog, invalidInput, requireRef } from '../../admin/form.js';
 import { triggerBatchJob } from './batch-trigger.js';
-import { adminTabs, csrfField, flashMessages, type AdminPageContext } from './common.js';
+import { adminTabs, csrfField, flashCount, flashMessages, type AdminPageContext } from './common.js';
 
 /**
  * ナレッジ管理(要件 v0.4): Drive のナレッジ文書の一覧・投入・上書き・削除と即時同期。
@@ -77,11 +77,13 @@ export function normalizeKnowledgeFileName(input: string): string {
 /**
  * 格納先からフォルダ規約(要件 M1)のパスセグメントを組み立てる。
  *   judgement → judgement/ / domain → domain/{業界ID}/ / customer → customer/{顧客ID}/
+ *   project → project/{プロジェクトID}/(v0.12 §4)
  */
 export function knowledgeFolderSegments(
   target: string,
   industryId: string | null,
   customerId: string | null,
+  projectId: string | null,
 ): string[] {
   if (target === 'judgement') return ['judgement'];
   if (target === 'domain') {
@@ -91,6 +93,10 @@ export function knowledgeFolderSegments(
   if (target === 'customer') {
     if (customerId === null) throw invalidInput('顧客を選択してください');
     return ['customer', customerId];
+  }
+  if (target === 'project') {
+    if (projectId === null) throw invalidInput('プロジェクトを選択してください');
+    return ['project', projectId];
   }
   throw invalidInput('格納先が不正です');
 }
@@ -109,6 +115,11 @@ interface IndustryOption {
 
 interface CustomerOption {
   customer_id: string;
+  name: string;
+}
+
+interface ProjectOption {
+  project_id: string;
   name: string;
 }
 
@@ -144,11 +155,7 @@ function parseFailedNames(param: string | null): string[] {
 function uploadFlash(ctx: AdminPageContext): Raw {
   const params = ctx.url.searchParams;
   if (params.get('uploaded') !== '1') return raw('');
-  const count = (name: string): string => {
-    const value = params.get(name) ?? '';
-    return /^\d{1,6}$/.test(value) ? value : '0';
-  };
-  const failed = count('failed');
+  const failed = flashCount(params, 'failed');
   const tone = failed === '0' ? 'ok' : 'error';
   // 失敗ファイル名は JSON 配列で受け渡す(日本語名対応: v0.11)。表示は h() で
   // エスケープするが、クエリ偽装に備えてファイル名規約(拡張子・長さ・禁止文字)も検証する
@@ -158,21 +165,17 @@ function uploadFlash(ctx: AdminPageContext): Raw {
       ? `。失敗したファイル: ${failedNames.map((n) => h(n)).join('、')}(ログ AIM-6006 を確認してください)`
       : '';
   return raw(
-    `<div class="alert ${tone}">ファイルを投入しました(新規 ${count('created')} 件・上書き ${count('updated')} 件・失敗 ${failed} 件)${failedNote}</div>`,
+    `<div class="alert ${tone}">ファイルを投入しました(新規 ${flashCount(params, 'created')} 件・上書き ${flashCount(params, 'updated')} 件・失敗 ${failed} 件)${failedNote}</div>`,
   );
 }
 
 function syncFlash(ctx: AdminPageContext): Raw {
   const params = ctx.url.searchParams;
   if (params.get('synced') === '1') {
-    const count = (name: string): string => {
-      const value = params.get(name) ?? '';
-      return /^\d{1,6}$/.test(value) ? value : '0';
-    };
-    const failed = count('failed');
+    const failed = flashCount(params, 'failed');
     const tone = failed === '0' ? 'ok' : 'error';
     return raw(
-      `<div class="alert ${tone}">同期が完了しました(更新 ${count('sent')} 件・変更なし ${count('skipped')} 件・失敗 ${count('failed')} 件)</div>`,
+      `<div class="alert ${tone}">同期が完了しました(更新 ${flashCount(params, 'sent')} 件・変更なし ${flashCount(params, 'skipped')} 件・失敗 ${failed} 件)</div>`,
     );
   }
   const errorKey = params.get('sync_error');
@@ -220,6 +223,11 @@ export async function renderAdminKnowledge(pool: pg.Pool, ctx: AdminPageContext)
   const customers = await query<CustomerOption>(
     pool,
     `SELECT customer_id, name FROM ops.customers ORDER BY customer_id`,
+  );
+  // プロジェクト格納先(v0.12 §4)。終了済みプロジェクトの資料整理も想定し、状態で絞らない
+  const projects = await query<ProjectOption>(
+    pool,
+    `SELECT project_id, name FROM ops.projects ORDER BY name, project_id`,
   );
 
   // 同期状態(rag のチャンク集計)。表示用の補助情報のため、失敗しても一覧・投入は止めない(原則4)
@@ -355,6 +363,11 @@ export async function renderAdminKnowledge(pool: pg.Pool, ctx: AdminPageContext)
     customers.rows
       .map((c) => `<option value="${h(c.customer_id)}">${h(`${c.name}(${c.customer_id})`)}</option>`)
       .join('');
+  const projectOptions =
+    `<option value="">選択してください</option>` +
+    projects.rows
+      .map((p) => `<option value="${h(p.project_id)}">${h(`${p.name}(${p.project_id})`)}</option>`)
+      .join('');
 
   // 格納先の選択 UI(ファイルアップロード・直接入力の両フォームで共通)
   const destinationFields = `<label class="field">格納先</label>
@@ -362,6 +375,7 @@ export async function renderAdminKnowledge(pool: pg.Pool, ctx: AdminPageContext)
       <label class="check-row"><input type="radio" name="target" value="judgement" checked> 共通(judgement/ — 判断基準・例え話)</label>
       <label class="check-row"><input type="radio" name="target" value="domain"> 業界(domain/{業界ID}/)</label>
       <label class="check-row"><input type="radio" name="target" value="customer"> 顧客(customer/{顧客ID}/)</label>
+      <label class="check-row"><input type="radio" name="target" value="project"> プロジェクト(project/{プロジェクトID}/)</label>
     </div>
     <div class="form-grid" style="margin-top:14px">
       <label class="field">業界(格納先が「業界」の場合に選択)
@@ -369,6 +383,9 @@ export async function renderAdminKnowledge(pool: pg.Pool, ctx: AdminPageContext)
       </label>
       <label class="field">顧客(格納先が「顧客」の場合に選択)
         <select name="customer_id">${customerOptions}</select>
+      </label>
+      <label class="field">プロジェクト(格納先が「プロジェクト」の場合に選択)
+        <select name="project_id">${projectOptions}</select>
       </label>
     </div>`;
 
@@ -427,7 +444,7 @@ export async function renderAdminKnowledge(pool: pg.Pool, ctx: AdminPageContext)
 
 /**
  * 格納先の検証と保存先フォルダの解決(直接入力・ファイルアップロード共通)。
- * 業界・顧客の実在性はマスタ(SoT)で検証する(セレクト偽装によるフォルダ規約外の作成を防ぐ)。
+ * 業界・顧客・プロジェクトの実在性はマスタ(SoT)で検証する(セレクト偽装によるフォルダ規約外の作成を防ぐ)。
  * フォルダ作成の副作用があるため、入力(ファイル名・本文)の検証後に呼ぶこと。
  */
 async function resolveUploadDestination(
@@ -436,11 +453,12 @@ async function resolveUploadDestination(
   rootFolderId: string,
 ): Promise<{ segments: string[]; targetFolderId: string }> {
   const target = (form.get('target') ?? '').trim();
-  if (target !== 'judgement' && target !== 'domain' && target !== 'customer') {
+  if (target !== 'judgement' && target !== 'domain' && target !== 'customer' && target !== 'project') {
     throw invalidInput('格納先が不正です');
   }
   let industryId: string | null = null;
   let customerId: string | null = null;
+  let projectId: string | null = null;
   if (target === 'domain') {
     industryId = requireRef(form, 'industry_id', '業界');
     const found = await query(pool, `SELECT 1 FROM ops.industries WHERE industry_id = $1 AND active`, [
@@ -459,7 +477,17 @@ async function resolveUploadDestination(
       throw invalidInput('存在しない顧客が指定されました。ページを再読み込みしてやり直してください');
     }
   }
-  const segments = knowledgeFolderSegments(target, industryId, customerId);
+  if (target === 'project') {
+    // 顧客と同じ検証パターン(v0.12 §4): 実在するプロジェクトのみ格納先にできる
+    projectId = requireRef(form, 'project_id', 'プロジェクト');
+    const found = await query(pool, `SELECT 1 FROM ops.projects WHERE project_id = $1`, [
+      projectId,
+    ]);
+    if ((found.rowCount ?? 0) === 0) {
+      throw invalidInput('存在しないプロジェクトが指定されました。ページを再読み込みしてやり直してください');
+    }
+  }
+  const segments = knowledgeFolderSegments(target, industryId, customerId, projectId);
   const targetFolderId = await ensureSubfolder(rootFolderId, ...segments);
   return { segments, targetFolderId };
 }

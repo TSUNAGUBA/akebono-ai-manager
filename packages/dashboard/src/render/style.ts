@@ -290,6 +290,14 @@ a:hover { text-decoration: underline; }
 .btn-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .inline-form { display: inline-block; margin: 0; }
 
+/* ── 長文の折りたたみ・対話ターン表示(エスカレーション・対話ログ — v0.12)── */
+.fold summary { cursor: pointer; color: var(--accent); font-size: 13px; }
+/* ユーザー入力(状況・対話・フィードバック)の改行を保持しつつ、はみ出しを防ぐ */
+.pre-wrap { white-space: pre-wrap; overflow-wrap: anywhere; text-align: left; }
+.turn { padding: 6px 0; font-size: 14px; }
+.turn + .turn { border-top: 1px solid var(--border); }
+.turn .turn-role { font-weight: 600; font-size: 12px; color: var(--text-muted); }
+
 /* ── モバイル ── */
 @media (max-width: 720px) {
   .container { padding: 20px 14px 48px; }

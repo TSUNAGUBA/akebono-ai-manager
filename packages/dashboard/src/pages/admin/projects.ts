@@ -7,11 +7,13 @@ import {
   auditLog,
   hasPgCode,
   invalidInput,
+  isRealDateString,
   optionalInt,
   optionalText,
   PG_FOREIGN_KEY_VIOLATION,
   PG_UNIQUE_VIOLATION,
   requireId,
+  requireNumericId,
   requireRef,
   requireText,
   writeConflict,
@@ -389,25 +391,6 @@ export async function renderAdminProjects(pool: pg.Pool, ctx: AdminPageContext):
     )}
     ${section('プロジェクトの追加', createForm, undefined, 'create')}
   `;
-}
-
-/**
- * 数値 ID(BIGINT 列の識別子)。requireRef は長さしか検証しないため、
- * 非数値が PG の 22P02(→ 500)に落ちる前に 400 で弾く。
- */
-function requireNumericId(form: URLSearchParams, field: string, label: string): string {
-  const value = requireRef(form, field, label);
-  if (!/^\d+$/.test(value)) {
-    throw invalidInput(`${label}の指定が不正です。ページを再読み込みしてやり直してください`);
-  }
-  return value;
-}
-
-/** YYYY-MM-DD 形式かつカレンダー上実在する日付か(2026-02-31 等を 500 にせず 400 で弾く)。 */
-function isRealDateString(value: string): boolean {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
-  const date = new Date(`${value}T00:00:00Z`);
-  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
 }
 
 /**

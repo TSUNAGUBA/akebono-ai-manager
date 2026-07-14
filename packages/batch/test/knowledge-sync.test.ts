@@ -50,6 +50,16 @@ describe('runKnowledgeSync(ナレッジ同期の掃除保護 — v0.11)', () => 
     expect(cleanup?.params[0]).toEqual(['doc-1']);
   });
 
+  it('掃除は Drive 由来でない還流チャンク(escalation/% と feedback/%)を除外する(v0.12 §7)', async () => {
+    const { pool, calls } = createMockPool(baseResponder);
+    await runKnowledgeSync(pool);
+
+    const cleanup = findCall(calls, 'doc_id = ANY');
+    // SoT が ops.escalations / ops.dialogue_feedback にあるキャッシュを Drive 同期が消さない
+    expect(cleanup?.text).toContain(`doc_id NOT LIKE 'escalation/%'`);
+    expect(cleanup?.text).toContain(`doc_id NOT LIKE 'feedback/%'`);
+  });
+
   it('アクセスできないショートカットがある場合、削除掃除をスキップして既存チャンクを保護する(原則2)', async () => {
     mocks.listFilesRecursive.mockResolvedValue({
       files: [docFile],
@@ -83,5 +93,53 @@ describe('runKnowledgeSync(ナレッジ同期の掃除保護 — v0.11)', () => 
     expect(findCall(calls, 'INSERT INTO rag.knowledge_chunks')).toBeUndefined();
     // スキップしたファイルも列挙済みのため、掃除の保護対象に含まれる(チャンクは消えない)
     expect(findCall(calls, 'doc_id = ANY')?.params[0]).toEqual(['doc-1']);
+  });
+});
+
+describe('runKnowledgeSync(プロジェクトナレッジ — v0.12 §4)', () => {
+  const projectFile = { id: 'doc-p', name: 'plan.md', mimeType: 'text/markdown', path: 'project/p1' };
+
+  it('project/{プロジェクトID}/ の文書を project_doc として project_id 付きで取り込む', async () => {
+    mocks.listFilesRecursive.mockResolvedValue({ files: [projectFile], unresolvedShortcuts: [] });
+    const { pool, calls } = createMockPool((text) => {
+      if (text.includes('FROM ops.projects')) return { rows: [{ project_id: 'p1' }] };
+      return { rows: [] };
+    });
+    const summary = await runKnowledgeSync(pool);
+
+    expect(summary).toEqual({ sent: 1, skipped: 0, failed: 0 });
+    const insert = findCall(calls, 'INSERT INTO rag.knowledge_chunks');
+    expect(insert?.text).toContain('project_id');
+    // params: [doc_id, doc_type, customer_id, industry_id, project_id, title, ...]
+    expect(insert?.params[1]).toBe('project_doc');
+    expect(insert?.params[4]).toBe('p1');
+    // 本文が変わらない場合の分類追従(UPDATE)にも project_id が含まれる
+    const follow = findCall(calls, 'project_id IS DISTINCT FROM');
+    expect(follow?.params).toEqual(['doc-p', 'project_doc', null, null, 'p1']);
+  });
+
+  it('プロジェクトIDがマスタに無くても project_id を保持して取り込みを継続する(顧客IDと同じ扱い)', async () => {
+    mocks.listFilesRecursive.mockResolvedValue({ files: [projectFile], unresolvedShortcuts: [] });
+    const { pool, calls } = createMockPool(baseResponder); // ops.projects は空
+    const summary = await runKnowledgeSync(pool);
+
+    expect(summary).toEqual({ sent: 1, skipped: 0, failed: 0 });
+    // 業界(industry_id は NULL 化)と異なり、後からのマスタ登録で有効になるよう保持する
+    expect(findCall(calls, 'INSERT INTO rag.knowledge_chunks')?.params[4]).toBe('p1');
+  });
+
+  it('project/ 直下(IDセグメントなし)の規約外配置も帰属なしで取り込みを継続する(警告のみ)', async () => {
+    mocks.listFilesRecursive.mockResolvedValue({
+      files: [{ ...projectFile, id: 'doc-root', path: 'project' }],
+      unresolvedShortcuts: [],
+    });
+    const { pool, calls } = createMockPool(baseResponder);
+    const summary = await runKnowledgeSync(pool);
+
+    // 非ブロッキング(顧客ID不一致と同じ): 取り込みは止めず project_id なしで登録する
+    expect(summary).toEqual({ sent: 1, skipped: 0, failed: 0 });
+    const insert = findCall(calls, 'INSERT INTO rag.knowledge_chunks');
+    expect(insert?.params[1]).toBe('project_doc');
+    expect(insert?.params[4]).toBeNull();
   });
 });

@@ -159,6 +159,8 @@ jobs:
           EMBEDDING_MODEL: ${{ secrets.EMBEDDING_MODEL }}
           KNOWLEDGE_SCOPE_HOPS: ${{ secrets.KNOWLEDGE_SCOPE_HOPS }}
           KNOWLEDGE_SCOPE_FALLBACK: ${{ secrets.KNOWLEDGE_SCOPE_FALLBACK }}
+          CALENDAR_ENABLED: ${{ secrets.CALENDAR_ENABLED }}
+          DELEGATION_SA_EMAIL: ${{ secrets.DELEGATION_SA_EMAIL }}
         run: |
           VPC_FLAGS=()
           if [ -n "$GCP_VPC_CONNECTOR" ]; then
@@ -166,9 +168,12 @@ jobs:
           fi
           # MODEL_PRICING_JSON はカンマを含むため、gcloud の代替デリミタ構文(^|^)で連結する
           ENV_VARS="GCP_PROJECT_ID=${GCP_PROJECT_ID}|GCP_REGION=${GCP_REGION}|GCP_PROJECT_NUMBER=${GCP_PROJECT_NUMBER}"
-          # 任意の Vertex/ナレッジスコープ設定(未設定ならコード側の既定値: 生成系 global / embedding は GCP_REGION、
-          # スコープはホップ数 1・フォールバック exclude-customer)
-          for name in ADMIN_SPACE_ID VERTEX_LOCATION VERTEX_EMBEDDING_LOCATION MODEL_FLASH_LITE MODEL_FLASH MODEL_PRO MODEL_PRICING_JSON EMBEDDING_MODEL KNOWLEDGE_SCOPE_HOPS KNOWLEDGE_SCOPE_FALLBACK; do
+          # 任意の Vertex/ナレッジスコープ/カレンダー設定(未設定ならコード側の既定値: 生成系 global /
+          # embedding は GCP_REGION、スコープはホップ数 1・フォールバック exclude-customer、カレンダーは無効)。
+          # カレンダー(CALENDAR_ENABLED / DELEGATION_SA_EMAIL)は v0.14 で随時 QA も参照する。
+          # ランタイム SA は 3 サービス共通のため、Workspace のドメイン全体委任(deployment-setup.md
+          # Step 7-6)は batch 向けの既存設定がそのまま使われる(chat-gateway 用の追加委任は不要)
+          for name in ADMIN_SPACE_ID VERTEX_LOCATION VERTEX_EMBEDDING_LOCATION MODEL_FLASH_LITE MODEL_FLASH MODEL_PRO MODEL_PRICING_JSON EMBEDDING_MODEL KNOWLEDGE_SCOPE_HOPS KNOWLEDGE_SCOPE_FALLBACK CALENDAR_ENABLED DELEGATION_SA_EMAIL; do
             if [ -n "${!name}" ]; then ENV_VARS="${ENV_VARS}|${name}=${!name}"; fi
           done
           # Chat からのリクエストはアプリ層で JWT 検証するため公開エンドポイントとする

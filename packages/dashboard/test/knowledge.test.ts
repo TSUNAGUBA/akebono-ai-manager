@@ -164,17 +164,19 @@ describe('ファイル名の検証(normalizeKnowledgeFileName)', () => {
 });
 
 describe('格納先パスの組み立て(knowledgeFolderSegments)', () => {
-  it('judgement / domain / customer をフォルダ規約(M1)のセグメントに変換する', () => {
-    expect(knowledgeFolderSegments('judgement', null, null)).toEqual(['judgement']);
-    expect(knowledgeFolderSegments('domain', 'retail', null)).toEqual(['domain', 'retail']);
-    expect(knowledgeFolderSegments('customer', null, 'acme')).toEqual(['customer', 'acme']);
+  it('judgement / domain / customer / project をフォルダ規約(M1・v0.12 §4)のセグメントに変換する', () => {
+    expect(knowledgeFolderSegments('judgement', null, null, null)).toEqual(['judgement']);
+    expect(knowledgeFolderSegments('domain', 'retail', null, null)).toEqual(['domain', 'retail']);
+    expect(knowledgeFolderSegments('customer', null, 'acme', null)).toEqual(['customer', 'acme']);
+    expect(knowledgeFolderSegments('project', null, null, 'a-sha-si')).toEqual(['project', 'a-sha-si']);
   });
 
-  it('業界・顧客の未選択、不明な格納先は AIM-6004(400)', () => {
+  it('業界・顧客・プロジェクトの未選択、不明な格納先は AIM-6004(400)', () => {
     for (const call of [
-      () => knowledgeFolderSegments('domain', null, null),
-      () => knowledgeFolderSegments('customer', null, null),
-      () => knowledgeFolderSegments('root', null, null),
+      () => knowledgeFolderSegments('domain', null, null, null),
+      () => knowledgeFolderSegments('customer', null, null, null),
+      () => knowledgeFolderSegments('project', null, null, null),
+      () => knowledgeFolderSegments('root', null, null, null),
     ]) {
       expect(call).toThrowError(expect.objectContaining({ code: ERROR_CODES.ADMIN_INPUT_INVALID }));
     }
@@ -297,6 +299,17 @@ describe('ナレッジページの描画', () => {
     expect(out).toContain('value="upload"');
     expect(out).toContain('<textarea name="content"');
   });
+
+  it('格納先にプロジェクト(project/{プロジェクトID}/)の選択肢とセレクトを表示する(v0.12 §4)', async () => {
+    process.env['KNOWLEDGE_DRIVE_FOLDER_ID'] = 'root-folder';
+    const captured: CapturedCall[] = [];
+    const out = (await renderAdminKnowledge(stubPool(captured), adminCtx())).html;
+    expect(out).toContain('value="project"');
+    expect(out).toContain('<select name="project_id">');
+    // 選択肢はプロジェクトマスタ(ops.projects)から名称順で取得する
+    const projectQuery = captured.find((c) => c.text.includes('FROM ops.projects'));
+    expect(projectQuery?.text).toContain('ORDER BY name');
+  });
 });
 
 describe('ナレッジ書込ハンドラ(POST)', () => {
@@ -349,6 +362,38 @@ describe('ナレッジ書込ハンドラ(POST)', () => {
     );
     expect(location).toBe('/admin/knowledge?saved=updated#upload-direct');
     expect(mocks.ensureSubfolder).toHaveBeenCalledWith('root-folder', 'customer', 'acme');
+  });
+
+  it('upload: プロジェクトへの投入は project/{プロジェクトID} 配下で、実在検証の SQL が整合する(v0.12 §4)', async () => {
+    process.env['KNOWLEDGE_DRIVE_FOLDER_ID'] = 'root-folder';
+    const captured: CapturedCall[] = [];
+    const location = await handleAdminKnowledgePost(
+      stubPool(captured),
+      viewer,
+      uploadForm({ target: 'project', project_id: 'a-sha-si', file_name: '議事メモ.md', content: '本文' }),
+    );
+    assertCallsValid(captured);
+    // 存在検証はプロジェクトマスタ(SoT)に対して行う
+    const check = captured.find((c) => c.text.includes('FROM ops.projects'));
+    expect(check?.params).toEqual(['a-sha-si']);
+    expect(location).toBe('/admin/knowledge?saved=created#upload-direct');
+    expect(mocks.ensureSubfolder).toHaveBeenCalledWith('root-folder', 'project', 'a-sha-si');
+  });
+
+  it('upload: 存在しないプロジェクト(マスタ照合 rowCount=0)は AIM-6004(400)で Drive に書き込まない', async () => {
+    process.env['KNOWLEDGE_DRIVE_FOLDER_ID'] = 'root-folder';
+    await expectAppErrorAsync(
+      () =>
+        handleAdminKnowledgePost(
+          stubPool([], { rowCount: 0 }),
+          viewer,
+          uploadForm({ target: 'project', project_id: 'ghost', file_name: 'a.md', content: 'x' }),
+        ),
+      ERROR_CODES.ADMIN_INPUT_INVALID,
+      400,
+      '存在しないプロジェクト',
+    );
+    expect(mocks.ensureSubfolder).not.toHaveBeenCalled();
   });
 
   it('upload: 存在しない業界(マスタ照合 rowCount=0)は AIM-6004(400)で Drive に書き込まない', async () => {

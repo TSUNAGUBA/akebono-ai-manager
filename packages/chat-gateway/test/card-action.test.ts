@@ -14,6 +14,13 @@ vi.mock('@ai-manager/shared', async (importOriginal) => {
   return { ...mod, sendChatMessage: mocks.sendChatMessage, embedTexts: mocks.embedTexts };
 });
 
+// 裁定の還流は shared/escalations.ts に共通化された(v0.12)。shared 内部の
+// `./vertex.js` 直接 import も同じ embedTexts モックを通す
+vi.mock('../../shared/src/vertex.js', async (importOriginal) => {
+  const mod = await importOriginal<typeof import('../../shared/src/vertex.js')>();
+  return { ...mod, embedTexts: mocks.embedTexts };
+});
+
 beforeEach(() => {
   mocks.sendChatMessage.mockClear();
   mocks.sendChatMessage.mockResolvedValue({});
@@ -282,13 +289,14 @@ describe('record_resolution(M6 裁定の記録)', () => {
     expect(JSON.stringify(result.cardsV2)).toContain('次のメッセージを裁定として記録します');
   });
 
-  it('裁定済みだが未還流の場合は再還流する(還流失敗の回復パス)', async () => {
+  it('裁定済みだが未還流の場合は再還流する(還流失敗の回復パス。NULL=v0.12 以前の裁定)', async () => {
     const resolved = {
       escalation_id: '5',
       reason: 'low_confidence',
       context: '質問: 種まきとは',
       status: 'resolved',
       resolution: '在庫僅少時は出荷優先で裁定する',
+      resolution_type: null,
       knowledge_reflected: false,
     };
     const { pool, calls } = createMockPool((text) => {
@@ -318,6 +326,7 @@ describe('record_resolution(M6 裁定の記録)', () => {
       context: '質問: 種まきとは',
       status: 'resolved',
       resolution: '在庫僅少時は出荷優先で裁定する',
+      resolution_type: 'ruling',
       knowledge_reflected: false,
     };
     const { pool, calls } = createMockPool((text) => {
@@ -337,6 +346,52 @@ describe('record_resolution(M6 裁定の記録)', () => {
     expect(json).toContain('record_resolution'); // 再試行ボタンから同じ回復パスに到達できる
   });
 
+  it('ダッシュボードの回答送信(admin_message)で解決済みのものは、ボタンを押しても還流しない(v0.12 §3 / ADR-18)', async () => {
+    // 未還流のまま残るが、回答文は decision_rules ナレッジ化してはならない
+    const answered = {
+      escalation_id: '5',
+      reason: 'low_confidence',
+      context: '質問: 種まきとは',
+      status: 'resolved',
+      resolution: '管理者からの回答文です',
+      resolution_type: 'admin_message',
+      knowledge_reflected: false,
+    };
+    const { pool, calls } = createMockPool((text) => {
+      if (text.includes('SET resolution_requested_by')) return { rows: [] };
+      if (text.includes('FROM ops.escalations WHERE escalation_id')) return { rows: [answered] };
+      return undefined;
+    });
+    const result = (await handleCardAction(
+      pool,
+      cardEvent('record_resolution', { escalationId: '5' }),
+      admin,
+    )) as { cardsV2?: unknown[] };
+
+    expect(findCall(calls, 'INSERT INTO rag.knowledge_chunks')).toBeUndefined();
+    expect(findCall(calls, 'SET knowledge_reflected = TRUE')).toBeUndefined();
+    expect(JSON.stringify(result.cardsV2)).toContain('裁定済み');
+  });
+
+  it('回答不要(no_action)で解決済みのものも、ボタンを押しても還流しない(v0.12 §3)', async () => {
+    const noAction = {
+      escalation_id: '5',
+      reason: 'low_confidence',
+      context: '質問: 種まきとは',
+      status: 'resolved',
+      resolution: '回答不要として解決',
+      resolution_type: 'no_action',
+      knowledge_reflected: false,
+    };
+    const { pool, calls } = createMockPool((text) => {
+      if (text.includes('SET resolution_requested_by')) return { rows: [] };
+      if (text.includes('FROM ops.escalations WHERE escalation_id')) return { rows: [noAction] };
+      return undefined;
+    });
+    await handleCardAction(pool, cardEvent('record_resolution', { escalationId: '5' }), admin);
+    expect(findCall(calls, 'INSERT INTO rag.knowledge_chunks')).toBeUndefined();
+  });
+
   it('還流済みなら再試行ボタンを押しても再還流せず、裁定済みの表示のみ(冪等)', async () => {
     const reflected = {
       escalation_id: '5',
@@ -344,6 +399,7 @@ describe('record_resolution(M6 裁定の記録)', () => {
       context: '質問: 種まきとは',
       status: 'resolved',
       resolution: '在庫僅少時は出荷優先で裁定する',
+      resolution_type: 'ruling',
       knowledge_reflected: true,
     };
     const { pool, calls } = createMockPool((text) => {

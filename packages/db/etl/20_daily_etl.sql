@@ -8,9 +8,16 @@
 --   - fact_workload はスナップショットを UPSERT
 --   - ディメンションは SCD Type 2(変更検知→現行行クローズ+新行追加)
 
+-- SECURITY DEFINER(v0.12): ダッシュボードの「集計を今すぐ実行」→ batch(ai_manager_app_rw)
+-- からも実行できるようにする。app_rw へ dwh 表の直接書込権限は与えず、この関数の実行のみを
+-- 許可する(最小権限)。定義者(マイグレーション実行ユーザー)はパーティション作成を含む
+-- 全操作の権限を持ち、pg_cron からの定時実行は従来どおり動作する。
+-- 本文の参照はすべてスキーマ修飾済みのため search_path は最小に固定する(乗っ取り防止)。
 CREATE OR REPLACE FUNCTION dwh.run_daily_etl(p_target_date DATE DEFAULT NULL)
 RETURNS void
 LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
   v_target       DATE;
@@ -206,6 +213,12 @@ BEGIN
   WHERE (s.created_at AT TIME ZONE 'Asia/Tokyo')::date BETWEEN v_lookback AND v_target;
 
   -- ── fact_workload(日次スナップショット: UPSERT)──────
+  -- スナップショットは「実行時点の ops.tasks の状態」を v_target のラベルで書くため、
+  -- 前日より古い対象日への再実行(手動バックフィル・直接実行)では既存行を上書きしない
+  -- (欠落行の補完のみ = DO UPDATE の WHERE 条件で保護。確定済みの履歴を今日の状態で
+  -- 巻き戻さない — 原則2)。当日・前日は従来どおり洗い替える(02:30 の定時実行が
+  -- 前日ラベルで書く既存動作と、当日の手動実行 → 定時実行による上書き確定の両方を維持)。
+  -- API 側(batch の daily-etl ジョブ)は当日のみ許可しており、これは直接実行への多層防御。
 
   INSERT INTO dwh.fact_workload
     (date_key, user_key, open_tasks, in_progress_tasks, blocked_tasks, overdue_tasks,
@@ -236,7 +249,8 @@ BEGIN
     blocked_tasks     = EXCLUDED.blocked_tasks,
     overdue_tasks     = EXCLUDED.overdue_tasks,
     checkin_completed = EXCLUDED.checkin_completed,
-    review_completed  = EXCLUDED.review_completed;
+    review_completed  = EXCLUDED.review_completed
+  WHERE v_target >= (now() AT TIME ZONE 'Asia/Tokyo')::date - 1;
 
   -- ── fact_escalation(解決は後日のため直近7日を洗い替え)──
 
@@ -259,3 +273,7 @@ BEGIN
   WHERE (e.created_at AT TIME ZONE 'Asia/Tokyo')::date BETWEEN v_lookback AND v_target;
 END;
 $$;
+
+-- SECURITY DEFINER 関数の実行権限は既定(PUBLIC)から剥奪し、必要なロールにのみ付与する
+-- (付与は 30_grants.sql — ロールが存在する環境でのみ付与)。
+REVOKE EXECUTE ON FUNCTION dwh.run_daily_etl(DATE) FROM PUBLIC;
