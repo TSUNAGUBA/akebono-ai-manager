@@ -1,5 +1,6 @@
 import {
   embedTexts,
+  ERROR_CODES,
   listFilesRecursive,
   logger,
   optionalEnv,
@@ -28,12 +29,14 @@ export async function runKnowledgeSync(pool: pg.Pool): Promise<JobSummary> {
   const { files, unresolvedShortcuts } = await listFilesRecursive(folderId);
   if (unresolvedShortcuts.length > 0) {
     logger.warn('アクセスできないショートカットがあります(先を読めないため同期対象外)', {
+      errorCode: ERROR_CODES.DRIVE_SYNC_FAILED,
       shortcuts: unresolvedShortcuts.slice(0, 20),
       hint: 'ショートカットは Drive の共有権限を引き継ぎません。実体フォルダをナレッジフォルダ内へ移動するか、ショートカット先をランタイム SA に共有してください(deployment-setup.md Step 7-3)',
     });
   }
   if (files.length === 0) {
     logger.warn('ナレッジフォルダにファイルが見つかりません(同期対象なし)', {
+      errorCode: ERROR_CODES.DRIVE_SYNC_FAILED,
       folderId,
       hint: 'KNOWLEDGE_DRIVE_FOLDER_ID のフォルダ ID が意図した場所か、フォルダがランタイム SA に共有されているかを、ダッシュボードのナレッジ管理ページ(文書一覧)で確認してください',
     });
@@ -210,7 +213,10 @@ export async function runKnowledgeSync(pool: pg.Pool): Promise<JobSummary> {
   // チャンクは Drive 由来ではない還流キャッシュのため、掃除対象から除外する。
   try {
     if (unresolvedShortcuts.length > 0) {
-      logger.info('アクセスできないショートカットがあるため、削除済み文書のチャンク掃除をスキップします');
+      logger.warn(
+        'アクセスできないショートカットがあるため、削除済み文書のチャンク掃除をスキップします(解消まで、Drive から削除した文書が検索に残り続けます)',
+        { errorCode: ERROR_CODES.DRIVE_SYNC_FAILED },
+      );
     } else if (files.length > 0) {
       await query(
         pool,
